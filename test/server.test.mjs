@@ -126,6 +126,8 @@ test("static app is served",async()=>{
   assert.match(html,/Personal finance, made clear/);
   assert.match(html,/Cash flow/);
   assert.match(html,/cashflowSankey/);
+  assert.match(html,/cashflowBarTooltip/);
+  assert.match(html,/cashflowMonthDetailsRows/);
   assert.match(html,/sankeyDetailsRows/);
   assert.match(html,/categorySelect/);
   assert.match(html,/plaidSettingsForm/);

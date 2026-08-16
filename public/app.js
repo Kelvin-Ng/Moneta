@@ -2,12 +2,13 @@ const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const fmt = (n, compact=false) => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:compact?0:2,notation:compact&&Math.abs(n)>9999?"compact":"standard"}).format(n);
 const iso = d => d.toISOString().slice(0,10);
-const state = {accounts:[],transactions:[],categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,snapshot_dates:0},sankeySelection:null,filters:{from:"",to:"",kinds:new Set(["income","expense","investment"]),accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
+const state = {accounts:[],transactions:[],categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,snapshot_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",kinds:new Set(["income","expense","investment"]),accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
 const colors=["#e97567","#6d5dfc","#e6a04b","#28a792","#9f938c","#60a5c5","#d577aa"];
 const sectionPaths={overview:"/overview",cashflow:"/cash-flow",networth:"/net-worth",transactions:"/transactions",accounts:"/accounts",insights:"/insights",settings:"/settings"};
 const pathSections=Object.fromEntries(Object.entries(sectionPaths).map(([section,path])=>[path,section]));
 let sankeyHoverIndex={byGroup:new Map(),byCategory:new Map(),groupControls:new Map()},sankeyHovered=[],sankeyHoverKey="";
 let netWorthChartState=null;
+let cashFlowBarChartState=null;
 const monitoredPlaidItems=new Set();
 let plaidSyncPollTimer=null,announcePlaidSync=false,plaidSyncError=null;
 
@@ -366,7 +367,9 @@ function renderCashFlow(){
   const rate=income?net/income*100:0;
   $("#cashflowRate").textContent=`${rate.toFixed(1)}%`;
   $("#cashflowRate").classList.toggle("negative",rate<0);
-  renderCashFlowBars();renderSankey();renderSankeyDetails();
+  const availableMonths=new Set(state.summary.months.filter(month=>month.income||month.expense).map(month=>month.month));
+  if(state.cashFlowMonthSelection&&!availableMonths.has(state.cashFlowMonthSelection))state.cashFlowMonthSelection=null;
+  renderCashFlowBars();renderCashFlowMonthDetails();renderSankey();renderSankeyDetails();
 }
 
 function sankeyControl(scope,item,kind,markup,className){
@@ -449,26 +452,83 @@ function renderSankeyDetails(){
   }).join("");
 }
 
+function cashFlowMonthLabel(month,short=false,includeYear=false){
+  return new Date(`${month}-02T12:00:00`).toLocaleDateString("en-US",short?{month:"short",year:includeYear?"2-digit":undefined}:{month:"long",year:"numeric"});
+}
+
+function renderCashFlowMonthDetails(){
+  const details=$("#cashflowMonthDetails"),month=state.cashFlowMonthSelection;
+  if(!month){details.hidden=true;return}
+  const rows=state.transactions.filter(transaction=>["income","expense"].includes(transaction.kind)&&transaction.date.slice(0,7)===month);
+  const income=rows.filter(transaction=>transaction.kind==="income").reduce((sum,transaction)=>sum+Math.abs(Number(transaction.amount)||0),0);
+  const expense=rows.filter(transaction=>transaction.kind==="expense").reduce((sum,transaction)=>sum+Math.abs(Number(transaction.amount)||0),0);
+  const net=income-expense,rate=income?net/income*100:null;
+  details.hidden=false;
+  $("#cashflowMonthDetailsTitle").textContent=cashFlowMonthLabel(month);
+  $("#cashflowMonthDetailsSummary").textContent=`${rows.length} transaction${rows.length===1?"":"s"} · Income ${fmt(income)} · Expenses ${fmt(expense)} · Net income ${fmt(net)} · Saving rate ${rate===null?"—":`${rate.toFixed(1)}%`}`;
+  $("#cashflowMonthDetailsTable").hidden=!rows.length;
+  $("#cashflowMonthDetailsEmpty").hidden=Boolean(rows.length);
+  $("#cashflowMonthDetailsRows").innerHTML=rows.map(transaction=>{
+    const amount=transaction.kind==="income"?`+${fmt(Math.abs(transaction.amount))}`:fmt(-Math.abs(transaction.amount));
+    return `<tr><td>${new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(transaction.merchant)}</strong>${transaction.note?`<small>${escapeHtml(transaction.note)}</small>`:""}</td><td>${escapeHtml(transaction.category_group||groupForCategory(transaction.category,transaction.kind))}</td><td><span class="category-chip">${escapeHtml(transaction.category)}</span></td><td>${escapeHtml(transaction.account_name)}</td><td><span class="type-chip ${transaction.kind}">${transaction.kind}</span></td><td class="right amount ${transaction.kind==="income"?"positive":""}">${amount}</td></tr>`;
+  }).join("");
+}
+
+function selectCashFlowMonth(month){
+  state.cashFlowMonthSelection=state.cashFlowMonthSelection===month?null:month;
+  renderCashFlowBars();renderCashFlowMonthDetails();
+  if(state.cashFlowMonthSelection)requestAnimationFrame(()=>$("#cashflowMonthDetails").scrollIntoView({behavior:"smooth",block:"start"}));
+}
+
+function hideCashFlowBarTooltip(){
+  $("#cashflowBarTooltip").hidden=true;
+  $$("#cashflowBarChart .cashflow-month-group.hovered").forEach(group=>group.classList.remove("hovered"));
+}
+
+function showCashFlowBarTooltip(index){
+  const chart=cashFlowBarChartState,svg=$("#cashflowBarChart"),tooltip=$("#cashflowBarTooltip");
+  if(!chart||!chart.data[index])return hideCashFlowBarTooltip();
+  const value=chart.data[index],net=value.income-value.expense,rate=value.income?net/value.income*100:null;
+  $$("#cashflowBarChart .cashflow-month-group").forEach((group,groupIndex)=>group.classList.toggle("hovered",groupIndex===index));
+  tooltip.innerHTML=`<span>${cashFlowMonthLabel(value.month)}</span><div><small>Income</small><strong class="positive">${fmt(value.income)}</strong></div><div><small>Expenses</small><strong class="negative">${fmt(value.expense)}</strong></div><div><small>Net income</small><strong class="${net>=0?"positive":"negative"}">${fmt(net)}</strong></div><div><small>Saving rate</small><strong class="${rate!==null&&rate<0?"negative":""}">${rate===null?"—":`${rate.toFixed(1)}%`}</strong></div>`;
+  tooltip.hidden=false;
+  const bounds=svg.getBoundingClientRect(),wrapperBounds=tooltip.parentElement.getBoundingClientRect();
+  const pointX=chart.pad.l+chart.groupW*(index+.5),screenX=bounds.left+pointX/chart.W*bounds.width;
+  let left=screenX-wrapperBounds.left+12;
+  if(left+tooltip.offsetWidth>wrapperBounds.width-5)left=screenX-wrapperBounds.left-tooltip.offsetWidth-12;
+  tooltip.style.left=`${Math.max(5,left)}px`;tooltip.style.top=`${Math.max(5,bounds.top-wrapperBounds.top+chart.pad.t)}px`;
+}
+
+function updateCashFlowBarHover(event){
+  const chart=cashFlowBarChartState,svg=$("#cashflowBarChart");
+  if(!chart)return;
+  const bounds=svg.getBoundingClientRect(),svgX=(event.clientX-bounds.left)*chart.W/bounds.width,svgY=(event.clientY-bounds.top)*chart.H/bounds.height;
+  if(svgX<chart.pad.l||svgX>chart.W-chart.pad.r||svgY<chart.pad.t||svgY>chart.H-chart.pad.b)return hideCashFlowBarTooltip();
+  showCashFlowBarTooltip(Math.max(0,Math.min(chart.data.length-1,Math.floor((svgX-chart.pad.l)/chart.groupW))));
+}
+
 function renderCashFlowBars(){
-  const svg=$("#cashflowBarChart"),data=state.summary.months;
-  if(!data.length){svg.setAttribute("viewBox","0 0 900 300");svg.style.minWidth="900px";svg.innerHTML=`<text x="450" y="150" text-anchor="middle" class="axis-label">No income or expenses in this range</text>`;return}
-  const W=Math.max(900,data.length*84),H=310,pad={l:64,r:24,t:24,b:48};
-  const max=Math.max(1,...data.flatMap(d=>[d.income,d.expense]));
-  const plotW=W-pad.l-pad.r,groupW=plotW/data.length,barW=Math.min(26,groupW*.3);
-  const y=value=>pad.t+(H-pad.t-pad.b)*(1-value/max);
+  const svg=$("#cashflowBarChart"),data=state.summary.months.filter(month=>month.income||month.expense);
+  hideCashFlowBarTooltip();
+  if(!data.length){cashFlowBarChartState=null;hideCashFlowBarTooltip();svg.setAttribute("viewBox","0 0 900 320");svg.style.minWidth="900px";svg.innerHTML=`<text x="450" y="155" text-anchor="middle" class="axis-label">No income or expenses in this range</text>`;return}
+  const W=Math.max(900,data.length*88),H=340,pad={l:68,r:26,t:26,b:52};
+  const netValues=data.map(month=>month.income-month.expense),domainMin=Math.min(0,...netValues),domainMax=Math.max(1,...data.flatMap(month=>[month.income,month.expense]),...netValues);
+  const plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b,groupW=plotW/data.length,barW=Math.min(26,groupW*.28);
+  const y=value=>pad.t+plotH*(domainMax-value)/(domainMax-domainMin),zeroY=y(0);
   let html="";
   for(let i=0;i<5;i++){
-    const value=max*(4-i)/4,yy=y(value);
-    html+=`<line x1="${pad.l}" y1="${yy}" x2="${W-pad.r}" y2="${yy}" class="grid-line"/><text x="${pad.l-10}" y="${yy+4}" text-anchor="end" class="axis-label">${fmt(value,true)}</text>`;
+    const value=domainMin+(domainMax-domainMin)*(4-i)/4,yy=y(value);
+    html+=`<line x1="${pad.l}" y1="${yy}" x2="${W-pad.r}" y2="${yy}" class="grid-line${Math.abs(value)<.0001?" cashflow-zero-line":""}"/><text x="${pad.l-10}" y="${yy+4}" text-anchor="end" class="axis-label">${fmt(value,true)}</text>`;
   }
-  data.forEach((d,i)=>{
-    const center=pad.l+groupW*(i+.5),incomeH=H-pad.b-y(d.income),expenseH=H-pad.b-y(d.expense);
-    const label=new Date(`${d.month}-02T12:00:00`).toLocaleDateString("en-US",{month:"short",year:data.length>12?"2-digit":undefined});
-    html+=`<rect x="${center-barW-2}" y="${y(d.income)}" width="${barW}" height="${incomeH}" rx="4" fill="#28a792"><title>${label} income: ${fmt(d.income)}</title></rect>`;
-    html+=`<rect x="${center+2}" y="${y(d.expense)}" width="${barW}" height="${expenseH}" rx="4" fill="#e97567"><title>${label} expenses: ${fmt(d.expense)}</title></rect>`;
-    html+=`<text x="${center}" y="${H-17}" text-anchor="middle" class="axis-label">${label}</text>`;
+  data.forEach((month,index)=>{
+    const center=pad.l+groupW*(index+.5),incomeY=y(month.income),expenseY=y(month.expense),label=cashFlowMonthLabel(month.month,true,data.length>12),selected=state.cashFlowMonthSelection===month.month;
+    html+=`<g class="cashflow-month-group${selected?" selected":""}" data-cashflow-month="${month.month}" data-cashflow-index="${index}" role="button" tabindex="0" aria-label="Show transactions for ${cashFlowMonthLabel(month.month)}">${selected?`<rect class="cashflow-month-selection" x="${pad.l+groupW*index+3}" y="${pad.t}" width="${Math.max(1,groupW-6)}" height="${plotH}" rx="8"/>`:""}<rect class="cashflow-income-bar" x="${center-barW-2}" y="${incomeY}" width="${barW}" height="${Math.max(0,zeroY-incomeY)}" rx="4"/><rect class="cashflow-expense-bar" x="${center+2}" y="${expenseY}" width="${barW}" height="${Math.max(0,zeroY-expenseY)}" rx="4"/><text x="${center}" y="${H-17}" text-anchor="middle" class="axis-label">${label}</text><rect class="cashflow-month-hit" x="${pad.l+groupW*index}" y="${pad.t}" width="${groupW}" height="${H-pad.t-pad.b+30}" fill="transparent"/></g>`;
   });
+  const line=netValues.map((value,index)=>`${index?"L":"M"} ${pad.l+groupW*(index+.5)} ${y(value)}`).join(" ");
+  html+=`<path d="${line}" class="cashflow-net-line"/>`;
+  netValues.forEach((value,index)=>{const center=pad.l+groupW*(index+.5),selected=state.cashFlowMonthSelection===data[index].month;html+=`<circle cx="${center}" cy="${y(value)}" r="${selected?5:4}" class="cashflow-net-point${selected?" selected":""}"/>`});
   svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.style.minWidth=`${W}px`;svg.innerHTML=html;
+  cashFlowBarChartState={data,W,H,pad,groupW,y};
 }
 
 function renderSankey(){
@@ -736,6 +796,12 @@ function bind(){
   };
   $("#netWorthChart").onpointermove=updateNetWorthHover;
   $("#netWorthChart").onpointerleave=hideNetWorthHover;
+  $("#cashflowBarChart").onpointermove=updateCashFlowBarHover;
+  $("#cashflowBarChart").onpointerleave=hideCashFlowBarTooltip;
+  $("#cashflowBarChart").onclick=event=>{const group=event.target.closest?.("[data-cashflow-month]");if(group)selectCashFlowMonth(group.dataset.cashflowMonth)};
+  $("#cashflowBarChart").onkeydown=event=>{if(!["Enter"," "].includes(event.key))return;const group=event.target.closest?.("[data-cashflow-month]");if(group){event.preventDefault();selectCashFlowMonth(group.dataset.cashflowMonth)}};
+  $("#cashflowBarChart").onfocusin=event=>{const group=event.target.closest?.("[data-cashflow-index]");if(group)showCashFlowBarTooltip(Number(group.dataset.cashflowIndex))};
+  $("#cashflowBarChart").onfocusout=event=>{if(!event.relatedTarget?.closest?.("#cashflowBarChart [data-cashflow-month]"))hideCashFlowBarTooltip()};
   $(".sankey-scroll").onclick=event=>{const node=event.target.closest?.("[data-sankey-scope]");if(node&&node.dataset.sankeyClickable!=="false")return selectSankeyNode(node);if(event.target===event.currentTarget||event.target===$("#cashflowSankey"))clearSankeySelection()};
   $("#cashflowSankey").onkeydown=event=>{if(!["Enter"," "].includes(event.key))return;const node=event.target.closest?.("[data-sankey-scope]");if(node&&node.dataset.sankeyClickable!=="false"){event.preventDefault();selectSankeyNode(node)}};
   $("#cashflowSankey").onpointerover=event=>{const control=event.target.closest?.("[data-sankey-scope]");if(control&&control!==event.relatedTarget?.closest?.("[data-sankey-scope]"))setSankeyHover(control,true)};

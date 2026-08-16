@@ -117,9 +117,14 @@
       <article class="card cashflow-report-card">
         <div class="card-heading">
           <div><h2>Income vs. expenses</h2><p>Monthly totals using the filters above</p></div>
-          <div class="legend"><span><i class="dot income"></i>Income</span><span><i class="dot expense"></i>Expenses</span></div>
+          <div class="legend"><span><i class="dot income"></i>Income</span><span><i class="dot expense"></i>Expenses</span><span><i class="legend-line net"></i>Net income</span></div>
         </div>
-        <div class="cashflow-chart-scroll"><svg id="cashflowBarChart" role="img" aria-label="Monthly income and expense bar chart"></svg></div>
+        <div class="cashflow-bar-wrap"><div class="cashflow-chart-scroll"><svg id="cashflowBarChart" role="img" aria-label="Monthly income, expense, and net-income chart"></svg></div><div class="cashflow-bar-tooltip" id="cashflowBarTooltip" role="status" hidden></div></div>
+        <section class="sankey-details cashflow-month-details" id="cashflowMonthDetails" hidden>
+          <div class="sankey-details-heading"><div><p class="eyebrow">SELECTED MONTH</p><h2 id="cashflowMonthDetailsTitle">Transactions</h2><p id="cashflowMonthDetailsSummary"></p></div></div>
+          <div class="sankey-table-scroll" id="cashflowMonthDetailsTable"><table><thead><tr><th>Date</th><th>Description</th><th>Group</th><th>Category</th><th>Account</th><th>Type</th><th class="right">Amount</th></tr></thead><tbody id="cashflowMonthDetailsRows"></tbody></table></div>
+          <div class="sankey-details-empty" id="cashflowMonthDetailsEmpty" hidden>No income or expense transactions in this month.</div>
+        </section>
       </article>
 
       <article class="card cashflow-report-card sankey-card">
