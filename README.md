@@ -6,7 +6,7 @@ database and can import financial data through Plaid or CSV.
 
 ## Features
 
-- Unified income, expense, transfer, and investment activity
+- Unified activity classified by category group: Income, Transfers, or expenses
 - Plaid connections for supported banks, cards, and brokerages
 - Credit-card payment matching so transfers are not counted as duplicate expenses
 - Monarch-style category groups and categories
@@ -121,14 +121,21 @@ When using `FINANCE_DB_PATH`, its containing directory must already exist.
 
 ## CSV import
 
-CSV files require `date`, `merchant`, and `amount` columns. Optional columns are
-`category`, `kind`, `note`, and `external_id`.
+CSV files require `date`, `merchant`, `amount`, and `category` columns. Optional
+columns are `note` and `external_id`.
 
 ```csv
-date,merchant,amount,category,kind
-2026-07-01,Example Payroll,3500,Paychecks,income
-2026-07-02,Local Market,-82.14,Groceries,expense
+date,merchant,amount,category
+2026-07-01,Example Payroll,3500,Paychecks
+2026-07-02,Local Market,-82.14,Groceries
+2026-07-03,Local Market Refund,20.00,Groceries
 ```
+
+Amounts are signed: positive values are money in or credits, while negative
+values are money out or charges. Classification comes only from the category's
+group. Categories in Income are income, categories in Transfers are transfers,
+and all other categories are expenses. A positive expense, such as the refund
+above, reduces the expense total without being reclassified as income.
 
 Use a stable `external_id` when available to make repeated imports safely skip
 the same records. CSV import remains available for institutions or products not

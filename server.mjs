@@ -35,7 +35,6 @@ db.exec(`
     merchant TEXT NOT NULL,
     category TEXT NOT NULL,
     amount REAL NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('income','expense','transfer','investment')),
     note TEXT NOT NULL DEFAULT '',
     pending INTEGER NOT NULL DEFAULT 0,
     transfer_pair_id INTEGER REFERENCES transactions(id),
@@ -43,7 +42,6 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS tx_date ON transactions(date);
-  CREATE INDEX IF NOT EXISTS tx_kind ON transactions(kind);
   CREATE TABLE IF NOT EXISTS plaid_items (
     id INTEGER PRIMARY KEY,
     item_id TEXT NOT NULL UNIQUE,
@@ -217,41 +215,43 @@ function publicSettings() {
 }
 
 const MONARCH_CATEGORY_GROUPS = [
-  {name:"Income", kind:"income", categories:["Paychecks","Interest","Business Income","Other Income","Dividends & Capital Gains"]},
-  {name:"Gifts & Donations", kind:"expense", categories:["Charity","Gifts"]},
-  {name:"Auto & Transport", kind:"expense", categories:["Auto Payment","Public Transit","Gas","Auto Maintenance","Parking & Tolls","Taxi & Ride Shares"]},
-  {name:"Housing", kind:"expense", categories:["Mortgage","Rent","Home Improvement"]},
-  {name:"Bills & Utilities", kind:"expense", categories:["Garbage","Water","Gas & Electric","Internet & Cable","Phone"]},
-  {name:"Food & Dining", kind:"expense", categories:["Groceries","Restaurants & Bars","Coffee Shops"]},
-  {name:"Travel & Lifestyle", kind:"expense", categories:["Travel & Vacation","Entertainment & Recreation","Personal","Pets","Fun Money"]},
-  {name:"Shopping", kind:"expense", categories:["Shopping","Clothing","Furniture & Housewares","Electronics"]},
-  {name:"Children", kind:"expense", categories:["Child Care","Child Activities"]},
-  {name:"Education", kind:"expense", categories:["Student Loans","Education"]},
-  {name:"Health & Wellness", kind:"expense", categories:["Medical","Dentist","Fitness"]},
-  {name:"Financial", kind:"expense", categories:["Loan Repayment","Financial & Legal Services","Financial Fees","Cash & ATM","Insurance","Taxes"]},
-  {name:"Other", kind:"expense", categories:["Uncategorized","Check","Miscellaneous"]},
-  {name:"Business", kind:"expense", categories:["Advertising & Promotion","Business Utilities & Communication","Employee Wages & Contract Labor","Business Travel & Meals","Business Auto Expenses","Business Insurance","Office Supplies & Expenses","Office Rent","Postage & Shipping"]},
-  {name:"Transfers", kind:"transfer", categories:["Transfer","Credit Card Payment","Balance Adjustments","Buy","Sell"]}
+  {name:"Income", categories:["Paychecks","Interest","Business Income","Other Income","Dividends & Capital Gains"]},
+  {name:"Gifts & Donations", categories:["Charity","Gifts"]},
+  {name:"Auto & Transport", categories:["Auto Payment","Public Transit","Gas","Auto Maintenance","Parking & Tolls","Taxi & Ride Shares"]},
+  {name:"Housing", categories:["Mortgage","Rent","Home Improvement"]},
+  {name:"Bills & Utilities", categories:["Garbage","Water","Gas & Electric","Internet & Cable","Phone"]},
+  {name:"Food & Dining", categories:["Groceries","Restaurants & Bars","Coffee Shops"]},
+  {name:"Travel & Lifestyle", categories:["Travel & Vacation","Entertainment & Recreation","Personal","Pets","Fun Money"]},
+  {name:"Shopping", categories:["Shopping","Clothing","Furniture & Housewares","Electronics"]},
+  {name:"Children", categories:["Child Care","Child Activities"]},
+  {name:"Education", categories:["Student Loans","Education"]},
+  {name:"Health & Wellness", categories:["Medical","Dentist","Fitness"]},
+  {name:"Financial", categories:["Loan Repayment","Financial & Legal Services","Financial Fees","Cash & ATM","Insurance","Taxes"]},
+  {name:"Other", categories:["Uncategorized","Check","Miscellaneous"]},
+  {name:"Business", categories:["Advertising & Promotion","Business Utilities & Communication","Employee Wages & Contract Labor","Business Travel & Meals","Business Auto Expenses","Business Insurance","Office Supplies & Expenses","Office Rent","Postage & Shipping"]},
+  {name:"Transfers", categories:["Transfer","Credit Card Payment","Balance Adjustments","Buy","Sell"]}
 ];
 const MONARCH_CATEGORIES = MONARCH_CATEGORY_GROUPS.flatMap(group => group.categories);
 const MONARCH_CATEGORY_SET = new Set(MONARCH_CATEGORIES.map(category => category.toLowerCase()));
 const MONARCH_CATEGORY_LOOKUP = new Map(MONARCH_CATEGORY_GROUPS.flatMap(group =>
-  group.categories.map(category => [category.toLowerCase(), {group:group.name, kind:group.kind}])
+  group.categories.map(category => [category.toLowerCase(), group.name])
 ));
 
-function categoryGroupFor(category, kind) {
+function categoryGroupFor(category) {
   const match = MONARCH_CATEGORY_LOOKUP.get(String(category || "").toLowerCase());
-  if (match) return match.group;
-  if (kind === "income") return "Income";
-  if (kind === "transfer" || kind === "investment") return "Transfers";
-  return "Other";
+  return match || "Other";
+}
+
+function transactionClassForCategory(category) {
+  const group = categoryGroupFor(category);
+  return group === "Income" ? "income" : group === "Transfers" ? "transfer" : "expense";
 }
 
 function categoryTaxonomy(dbCategories = []) {
   const groups = MONARCH_CATEGORY_GROUPS.map(group => ({...group,categories:[...group.categories]}));
   for (const row of dbCategories) {
     if (MONARCH_CATEGORY_LOOKUP.has(String(row.category).toLowerCase())) continue;
-    const groupName = categoryGroupFor(row.category,row.kind);
+    const groupName = categoryGroupFor(row.category);
     const group = groups.find(candidate => candidate.name === groupName);
     if (group && !group.categories.includes(row.category)) group.categories.push(row.category);
   }
@@ -388,20 +388,20 @@ function isCreditCardPaymentText(value) {
   return /credit card|card.?pmt|card.?payment|autopay|e-?payment|payment received|bilt card.?pmt|citi autopay|discover-e-payment|capital one|american express|amex|amazon store card/.test(value);
 }
 
-function monarchKindFor({kind, category, merchant, amount, plaidPrimary, plaidDetailed}) {
+function categoryHintFor({hint, category, merchant, amount, plaidPrimary, plaidDetailed}) {
   const text = `${merchant || ""} ${category || ""} ${plaidPrimary || ""} ${plaidDetailed || ""}`.toLowerCase();
   if (plaidPrimary?.startsWith("TRANSFER_") || plaidDetailed === "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT") return "transfer";
-  if (kind === "transfer") return "transfer";
+  if (hint === "transfer") return "transfer";
   if (isCreditCardPaymentText(text)) return "transfer";
-  if (["income","expense","investment"].includes(kind)) return kind;
+  if (["income","expense","investment"].includes(hint)) return hint;
   return Number(amount) < 0 ? "expense" : "income";
 }
 
-function monarchCategoryFor({kind, category, merchant, plaidPrimary, plaidDetailed, investmentType, investmentSubtype, force = false}) {
+function monarchCategoryFor({hint, category, merchant, plaidPrimary, plaidDetailed, investmentType, investmentSubtype, force = false}) {
   const text = `${merchant || ""} ${category || ""} ${plaidPrimary || ""} ${plaidDetailed || ""}`.toLowerCase();
   const existing = String(category || "").trim();
   if (!force && existing && MONARCH_CATEGORY_SET.has(existing.toLowerCase())) return MONARCH_CATEGORIES.find(c => c.toLowerCase() === existing.toLowerCase());
-  if (kind === "transfer") {
+  if (hint === "transfer") {
     if (isCreditCardPaymentText(text))
       return "Credit Card Payment";
     if (/adjustment|opening balance|balance/.test(text)) return "Balance Adjustments";
@@ -410,14 +410,14 @@ function monarchCategoryFor({kind, category, merchant, plaidPrimary, plaidDetail
     return "Transfer";
   }
   if (/dividend|capital gain/.test(text)) return "Dividends & Capital Gains";
-  if (kind === "investment") {
+  if (hint === "investment") {
     if (/sell/.test(text)) return "Sell";
     if (/buy|purchase|reinvest|investment/.test(text)) return "Buy";
     return "Transfer";
   }
   if (plaidDetailed && PLAID_DETAILED_CATEGORY_MAP[plaidDetailed]) return PLAID_DETAILED_CATEGORY_MAP[plaidDetailed];
   if (plaidPrimary && PLAID_PRIMARY_CATEGORY_MAP[plaidPrimary]) return PLAID_PRIMARY_CATEGORY_MAP[plaidPrimary];
-  if (kind === "income") {
+  if (hint === "income") {
     if (/payroll|paycheck|salary|wage|amazon developme/.test(text)) return "Paychecks";
     if (/interest/.test(text)) return "Interest";
     if (/business|freelance|contract/.test(text)) return "Business Income";
@@ -451,22 +451,39 @@ function monarchCategoryFor({kind, category, merchant, plaidPrimary, plaidDetail
   return "Uncategorized";
 }
 
-function migrateMonarchCategories() {
-  const key = "category_schema";
-  if (db.prepare("SELECT value FROM settings WHERE key=?").get(key)?.value === "monarch-defaults-2026-01-03-v2") return;
-  const rows = db.prepare("SELECT id,merchant,category,kind,amount FROM transactions").all();
-  const update = db.prepare("UPDATE transactions SET category=?, kind=? WHERE id=?");
-  db.exec("BEGIN");
+function migrateTransactionClassification() {
+  const hasKind = db.prepare("PRAGMA table_info(transactions)").all().some(column=>column.name==="kind");
+  if (!hasKind) return;
+  db.exec("PRAGMA foreign_keys=OFF; BEGIN");
   try {
-    for (const tx of rows) {
-      const kind = monarchKindFor(tx);
-      update.run(monarchCategoryFor({...tx, kind, force:true}), kind, tx.id);
-    }
-    db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-      .run(key, "monarch-defaults-2026-01-03-v2");
-    db.exec("COMMIT");
+    db.exec(`
+      DROP TABLE IF EXISTS transactions_group_derived;
+      CREATE TABLE transactions_group_derived (
+        id INTEGER PRIMARY KEY,
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        date TEXT NOT NULL,
+        merchant TEXT NOT NULL,
+        category TEXT NOT NULL,
+        amount REAL NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        pending INTEGER NOT NULL DEFAULT 0,
+        transfer_pair_id INTEGER REFERENCES transactions_group_derived(id),
+        external_id TEXT UNIQUE,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO transactions_group_derived(
+        id,account_id,date,merchant,category,amount,note,pending,transfer_pair_id,external_id,created_at
+      ) SELECT id,account_id,date,merchant,category,amount,note,pending,transfer_pair_id,external_id,created_at
+        FROM transactions;
+      DROP TABLE transactions;
+      ALTER TABLE transactions_group_derived RENAME TO transactions;
+      CREATE INDEX tx_date ON transactions(date);
+      COMMIT;
+      PRAGMA foreign_keys=ON;
+    `);
   } catch (error) {
-    db.exec("ROLLBACK");
+    try { db.exec("ROLLBACK"); } catch {}
+    db.exec("PRAGMA foreign_keys=ON");
     throw error;
   }
 }
@@ -493,35 +510,35 @@ function generateDemoData() {
     }
   const dateDaysAgo=days=>{const date=new Date();date.setUTCHours(12,0,0,0);date.setUTCDate(date.getUTCDate()-days);return date.toISOString().slice(0,10)};
   const txs = [
-    ["checking",2,"Acme Studio","Paychecks",4200,"income"],
-    ["credit",3,"Neighborhood Bakery","Restaurants & Bars",-28.50,"expense"],
-    ["credit",4,"Whole Foods Market","Groceries",-126.37,"expense"],
-    ["investment",5,"Total Market Index Fund","Buy",500,"investment"],
-    ["checking",6,"Mission Apartments","Rent",-2450,"expense"],
-    ["checking",7,"Credit card payment","Credit Card Payment",-980,"transfer"],
-    ["credit",7,"Payment received","Credit Card Payment",980,"transfer"],
-    ["savings",9,"Interest payment","Interest",51.34,"income"],
-    ["credit",10,"Electric utility","Gas & Electric",-93.20,"expense"],
-    ["credit",13,"Coffee shop","Coffee Shops",-7.25,"expense"],
-    ["checking",18,"Acme Studio","Paychecks",4200,"income"],
-    ["credit",20,"United Airlines","Travel & Vacation",-458.10,"expense"],
-    ["investment",23,"Total Market Index Fund","Buy",500,"investment"],
-    ["credit",26,"Music subscription","Entertainment & Recreation",-11.99,"expense"],
-    ["credit",28,"Trader Joe's","Groceries",-84.62,"expense"],
-    ["checking",32,"Freelance project","Business Income",850,"income"],
-    ["checking",36,"Mission Apartments","Rent",-2450,"expense"],
-    ["investment",39,"Index fund dividend","Dividends & Capital Gains",94.75,"income"],
-    ["credit",42,"Outdoor store","Shopping",-164.80,"expense"],
-    ["credit",46,"Public transit","Public Transit",-81,"expense"],
-    ["checking",49,"Acme Studio","Paychecks",4200,"income"],
-    ["investment",54,"Total Market Index Fund","Buy",500,"investment"],
-    ["credit",58,"Neighborhood restaurant","Restaurants & Bars",-96.40,"expense"],
-    ["credit",62,"Whole Foods Market","Groceries",-139.11,"expense"],
-    ["checking",67,"Mission Apartments","Rent",-2450,"expense"]
+    ["checking",2,"Acme Studio","Paychecks",4200],
+    ["credit",3,"Neighborhood Bakery","Restaurants & Bars",-28.50],
+    ["credit",4,"Whole Foods Market","Groceries",-126.37],
+    ["investment",5,"Total Market Index Fund","Buy",-500],
+    ["checking",6,"Mission Apartments","Rent",-2450],
+    ["checking",7,"Credit card payment","Credit Card Payment",-980],
+    ["credit",7,"Payment received","Credit Card Payment",980],
+    ["savings",9,"Interest payment","Interest",51.34],
+    ["credit",10,"Electric utility","Gas & Electric",-93.20],
+    ["credit",13,"Coffee shop","Coffee Shops",-7.25],
+    ["checking",18,"Acme Studio","Paychecks",4200],
+    ["credit",20,"United Airlines","Travel & Vacation",-458.10],
+    ["investment",23,"Total Market Index Fund","Buy",-500],
+    ["credit",26,"Music subscription","Entertainment & Recreation",-11.99],
+    ["credit",28,"Trader Joe's","Groceries",-84.62],
+    ["checking",32,"Freelance project","Business Income",850],
+    ["checking",36,"Mission Apartments","Rent",-2450],
+    ["investment",39,"Index fund dividend","Dividends & Capital Gains",94.75],
+    ["credit",42,"Outdoor store","Shopping",-164.80],
+    ["credit",46,"Public transit","Public Transit",-81],
+    ["checking",49,"Acme Studio","Paychecks",4200],
+    ["investment",54,"Total Market Index Fund","Buy",-500],
+    ["credit",58,"Neighborhood restaurant","Restaurants & Bars",-96.40],
+    ["credit",62,"Whole Foods Market","Groceries",-139.11],
+    ["checking",67,"Mission Apartments","Rent",-2450]
   ];
-    const addTx = db.prepare("INSERT OR IGNORE INTO transactions(account_id,date,merchant,category,amount,kind,external_id) VALUES(?,?,?,?,?,?,?)");
-    txs.forEach(([account,days,merchant,category,amount,kind],index)=>{
-      transactionsAdded+=addTx.run(accountIds[account],dateDaysAgo(days),merchant,category,amount,kind,`demo:tx:${index}`).changes;
+    const addTx = db.prepare("INSERT OR IGNORE INTO transactions(account_id,date,merchant,category,amount,external_id) VALUES(?,?,?,?,?,?)");
+    txs.forEach(([account,days,merchant,category,amount],index)=>{
+      transactionsAdded+=addTx.run(accountIds[account],dateDaysAgo(days),merchant,category,amount,`demo:tx:${index}`).changes;
     });
     const pair = db.prepare("SELECT id FROM transactions WHERE external_id=?");
     const a = pair.get("demo:tx:5").id, b = pair.get("demo:tx:6").id;
@@ -532,7 +549,7 @@ function generateDemoData() {
   snapshotAccountBalances(Object.values(accountIds),"demo");
   return {accounts_added:accountsAdded,transactions_added:transactionsAdded,accounts:accounts.length,transactions:25};
 }
-migrateMonarchCategories();
+migrateTransactionClassification();
 
 function snapshotAccountBalances(accountIds, source = "sync") {
   const ids = Array.isArray(accountIds) ? accountIds.map(Number).filter(Number.isInteger) : [];
@@ -593,18 +610,18 @@ const accountBalance = account => {
   return account.type === "credit" ? -current : current;
 };
 const titleCase = value => String(value || "Uncategorized").toLowerCase().replaceAll("_", " ").replace(/\b\w/g, c => c.toUpperCase());
-const plaidCategory = (transaction, kind) => monarchCategoryFor({
-  kind,
+const plaidCategory = (transaction, hint) => monarchCategoryFor({
+  hint,
   category: transaction.category?.[0],
   merchant: transaction.merchant_name || transaction.name,
   plaidPrimary: transaction.personal_finance_category?.primary,
   plaidDetailed: transaction.personal_finance_category?.detailed
 });
-const plaidKind = transaction => {
+const plaidCategoryHint = transaction => {
   const primary = transaction.personal_finance_category?.primary || "";
   const detailed = transaction.personal_finance_category?.detailed || "";
-  return monarchKindFor({
-    kind: transaction.amount > 0 ? "expense" : "income",
+  return categoryHintFor({
+    hint: transaction.amount > 0 ? "expense" : "income",
     merchant: transaction.merchant_name || transaction.name,
     category: transaction.category?.[0],
     amount: -transaction.amount,
@@ -774,31 +791,27 @@ function upsertPlaidTransaction(transaction, investment = false) {
   if (!account) return;
   const externalId = `plaid:${investment ? transaction.investment_transaction_id : transaction.transaction_id}`;
   const rawAmount = Number(transaction.amount || 0);
-  const kind = investment ? (transaction.type === "transfer" ? "transfer" : "investment") : plaidKind(transaction);
-  const amount = kind === "expense" ? -Math.abs(rawAmount) :
-    kind === "income" ? Math.abs(rawAmount) :
-    investment ? -rawAmount : -rawAmount;
+  const hint = investment ? (transaction.type === "transfer" ? "transfer" : "investment") : plaidCategoryHint(transaction);
+  const amount = -rawAmount;
   const category = investment ? monarchCategoryFor({
-    kind,
+    hint,
     merchant: transaction.name || "Investment activity",
     category: transaction.subtype || transaction.type,
     investmentType: transaction.type,
     investmentSubtype: transaction.subtype
-  }) : plaidCategory(transaction, kind);
+  }) : plaidCategory(transaction, hint);
   db.prepare(`
-    INSERT INTO transactions(account_id,date,merchant,category,amount,kind,note,pending,external_id)
-    VALUES(?,?,?,?,?,?,?,?,?)
+    INSERT INTO transactions(account_id,date,merchant,category,amount,note,pending,external_id)
+    VALUES(?,?,?,?,?,?,?,?)
     ON CONFLICT(external_id) DO UPDATE SET
       account_id=excluded.account_id,date=excluded.date,merchant=excluded.merchant,
-      category=excluded.category,amount=excluded.amount,kind=excluded.kind,
-      note=excluded.note,pending=excluded.pending
+      category=excluded.category,amount=excluded.amount,note=excluded.note,pending=excluded.pending
   `).run(
     account.id,
     transaction.date || transaction.authorized_date,
     transaction.merchant_name || transaction.name || "Investment activity",
     category,
     amount,
-    kind,
     investment ? `${titleCase(transaction.type)}${transaction.quantity ? ` · ${transaction.quantity} units` : ""}` : "",
     transaction.pending ? 1 : 0,
     externalId
@@ -912,10 +925,6 @@ function listTransactions(params) {
   const clauses = ["1=1"], values = [];
   if (params.get("from")) { clauses.push("t.date >= ?"); values.push(params.get("from")); }
   if (params.get("to")) { clauses.push("t.date <= ?"); values.push(params.get("to")); }
-  if (params.get("kinds")) {
-    const kinds = params.get("kinds").split(",").filter(Boolean);
-    if (kinds.length) { clauses.push(`t.kind IN (${kinds.map(()=>"?").join(",")})`); values.push(...kinds); }
-  }
   if (params.get("accounts")) {
     const ids = params.get("accounts").split(",").filter(Boolean).map(Number);
     if (ids.length) { clauses.push(`t.account_id IN (${ids.map(()=>"?").join(",")})`); values.push(...ids); }
@@ -935,37 +944,36 @@ function listTransactions(params) {
     ORDER BY t.date DESC, t.id DESC
   `).all(...values).map(transaction => ({
     ...transaction,
-    category_group:categoryGroupFor(transaction.category,transaction.kind)
+    category_group:categoryGroupFor(transaction.category)
   }));
 }
 
 function summary(rows) {
-  const totals = { income:0, expense:0, investment:0, transfer:0 };
+  const totals = { income:0, expense:0, transfer:0 };
   const categories = {}, groups = {}, months = {};
   for (const tx of rows) {
-    const group = tx.category_group || categoryGroupFor(tx.category,tx.kind);
-    if (tx.kind === "income") {
+    const group = tx.category_group || categoryGroupFor(tx.category);
+    const transactionClass = transactionClassForCategory(tx.category);
+    if (transactionClass === "income") {
       totals.income += tx.amount;
-      groups[`income:${group}`] = (groups[`income:${group}`] || 0) + tx.amount;
+      groups[group] = (groups[group] || 0) + tx.amount;
     }
-    if (tx.kind === "expense") {
-      totals.expense += Math.abs(tx.amount);
-      categories[tx.category] = (categories[tx.category] || 0) + Math.abs(tx.amount);
-      groups[`expense:${group}`] = (groups[`expense:${group}`] || 0) + Math.abs(tx.amount);
+    if (transactionClass === "expense") {
+      totals.expense -= tx.amount;
+      categories[tx.category] = (categories[tx.category] || 0) - tx.amount;
+      groups[group] = (groups[group] || 0) - tx.amount;
     }
-    if (tx.kind === "investment") totals.investment += Math.abs(tx.amount);
-    if (tx.kind === "transfer") totals.transfer += tx.amount;
+    if (transactionClass === "transfer") totals.transfer += tx.amount;
     const month = tx.date.slice(0,7);
-    months[month] ||= { income:0, expense:0, investment:0 };
-    if (tx.kind === "income") months[month].income += tx.amount;
-    if (tx.kind === "expense") months[month].expense += Math.abs(tx.amount);
-    if (tx.kind === "investment") months[month].investment += Math.abs(tx.amount);
+    months[month] ||= { income:0, expense:0 };
+    if (transactionClass === "income") months[month].income += tx.amount;
+    if (transactionClass === "expense") months[month].expense -= tx.amount;
   }
   totals.net = totals.income - totals.expense;
   return {
     totals,
-    categories: Object.entries(categories).map(([name,value])=>({name,group:categoryGroupFor(name,"expense"),value})).sort((a,b)=>b.value-a.value),
-    groups: Object.entries(groups).map(([key,value])=>{const [kind,...name]=key.split(":");return {name:name.join(":"),kind,value}}).sort((a,b)=>b.value-a.value),
+    categories: Object.entries(categories).map(([name,value])=>({name,group:categoryGroupFor(name),value})).sort((a,b)=>b.value-a.value),
+    groups: Object.entries(groups).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value),
     months: Object.entries(months).map(([month,values])=>({month,...values})).sort((a,b)=>a.month.localeCompare(b.month))
   };
 }
@@ -973,7 +981,6 @@ function summary(rows) {
 function normalizeReportConfiguration(value = {}) {
   const source = value && typeof value === "object" ? value : {};
   const filters = source.filters && typeof source.filters === "object" ? source.filters : {};
-  const validKinds = new Set(["income","expense","investment","transfer"]);
   const range = ["month","quarter","year","all","custom"].includes(filters.range) ? filters.range : "custom";
   const date = input => /^\d{4}-\d{2}-\d{2}$/.test(String(input || "")) ? String(input) : "";
   const strings = input => Array.isArray(input) ? [...new Set(input.map(item=>String(item).trim()).filter(Boolean))] : [];
@@ -986,7 +993,6 @@ function normalizeReportConfiguration(value = {}) {
       range,
       from:date(filters.from),
       to:date(filters.to),
-      kinds:strings(filters.kinds).filter(kind=>validKinds.has(kind)),
       accounts,
       categories:strings(filters.categories),
       search:String(filters.search || "").trim().slice(0,200)
@@ -1193,7 +1199,7 @@ async function api(req, res, url) {
       FROM accounts a LEFT JOIN plaid_items p ON p.id=a.plaid_item_id ORDER BY a.id
     `).all();
     const transactions = listTransactions(url.searchParams);
-    const dbCategories = db.prepare("SELECT DISTINCT category,kind FROM transactions ORDER BY category").all();
+    const dbCategories = db.prepare("SELECT DISTINCT category FROM transactions ORDER BY category").all();
     const categories = [...new Set([...MONARCH_CATEGORIES, ...dbCategories.map(row=>row.category)])];
     return json(res, {accounts, transactions, categories, category_groups:categoryTaxonomy(dbCategories), views:listReportViews(), summary:summary(transactions)});
   }
@@ -1323,24 +1329,21 @@ async function api(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/transactions") {
     const v = await body(req);
-    if (!v.account_id || !v.date || !v.merchant || !["income","expense","transfer","investment"].includes(v.kind))
+    if (!v.account_id || !v.date || !v.merchant || !v.category || !Number.isFinite(Number(v.amount)))
       return json(res,{error:"Missing or invalid transaction fields"},400);
-    let amount = Math.abs(Number(v.amount));
-    const kind = monarchKindFor({kind:v.kind, category:v.category, merchant:v.merchant, amount});
-    if (kind === "expense") amount *= -1;
-    const category = monarchCategoryFor({kind, category:v.category, merchant:v.merchant});
-    const out = db.prepare("INSERT INTO transactions(account_id,date,merchant,category,amount,kind,note,pending) VALUES(?,?,?,?,?,?,?,?)")
-      .run(v.account_id,v.date,v.merchant,category,amount,kind,v.note || "",v.pending?1:0);
+    const category = monarchCategoryFor({category:v.category, merchant:v.merchant});
+    const out = db.prepare("INSERT INTO transactions(account_id,date,merchant,category,amount,note,pending) VALUES(?,?,?,?,?,?,?)")
+      .run(v.account_id,v.date,v.merchant,category,Number(v.amount),v.note || "",v.pending?1:0);
     return json(res,{id:Number(out.lastInsertRowid)},201);
   }
   if (req.method === "PATCH" && /^\/api\/transactions\/\d+$/.test(url.pathname)) {
     const id = Number(url.pathname.split("/").pop()), v = await body(req);
-    const fields = ["date","merchant","category","amount","kind","note","account_id"];
+    const fields = ["date","merchant","category","amount","note","account_id"];
     const present = fields.filter(k=>v[k] !== undefined);
     if (!present.length) return json(res,{error:"No fields to update"},400);
     if (present.includes("category")) {
-      const current = db.prepare("SELECT merchant,kind FROM transactions WHERE id=?").get(id);
-      v.category = monarchCategoryFor({kind:v.kind || current?.kind, category:v.category, merchant:v.merchant || current?.merchant});
+      const current = db.prepare("SELECT merchant FROM transactions WHERE id=?").get(id);
+      v.category = monarchCategoryFor({category:v.category, merchant:v.merchant || current?.merchant});
     }
     db.prepare(`UPDATE transactions SET ${present.map(k=>`${k}=?`).join(",")} WHERE id=?`).run(...present.map(k=>v[k]),id);
     return json(res,{ok:true});
@@ -1353,15 +1356,15 @@ async function api(req, res, url) {
     const v = await body(req);
     if (!v.account_id || !Array.isArray(v.rows)) return json(res,{error:"account_id and rows are required"},400);
     let added=0, skipped=0;
-    const insert = db.prepare("INSERT OR IGNORE INTO transactions(account_id,date,merchant,category,amount,kind,note,external_id) VALUES(?,?,?,?,?,?,?,?)");
+    const insert = db.prepare("INSERT OR IGNORE INTO transactions(account_id,date,merchant,category,amount,note,external_id) VALUES(?,?,?,?,?,?,?)");
     db.exec("BEGIN");
     try {
       for (const [i,r] of v.rows.entries()) {
         const amount=Number(r.amount);
-        const kind=monarchKindFor({kind:r.kind, category:r.category, merchant:r.merchant, amount});
+        if (!r.date || !r.merchant || !r.category || !Number.isFinite(amount)) throw new Error(`Invalid CSV row ${i+1}`);
         const key=r.external_id || `import-${v.account_id}-${r.date}-${r.merchant}-${amount}-${i}`;
-        const category=monarchCategoryFor({kind,category:r.category,merchant:r.merchant});
-        const result=insert.run(v.account_id,r.date,r.merchant,category,amount,kind,r.note||"",key);
+        const category=monarchCategoryFor({category:r.category,merchant:r.merchant});
+        const result=insert.run(v.account_id,r.date,r.merchant,category,amount,r.note||"",key);
         result.changes ? added++ : skipped++;
       }
       db.exec("COMMIT");
@@ -1394,18 +1397,19 @@ async function api(req, res, url) {
 }
 
 function detectTransfers() {
+  const transferCategories=MONARCH_CATEGORY_GROUPS.find(group=>group.name==="Transfers").categories;
   const candidates=db.prepare(`
     SELECT t.* FROM transactions t WHERE t.transfer_pair_id IS NULL
-      AND (t.kind='transfer' OR lower(t.category) LIKE '%payment%' OR lower(t.merchant) LIKE '%payment%')
+      AND (t.category IN (${transferCategories.map(()=>"?").join(",")}) OR lower(t.category) LIKE '%payment%' OR lower(t.merchant) LIKE '%payment%')
     ORDER BY t.date
-  `).all();
+  `).all(...transferCategories);
   let matched=0;
   for (let i=0;i<candidates.length;i++) for(let j=i+1;j<candidates.length;j++) {
     const a=candidates[i], b=candidates[j];
     const days=Math.abs((new Date(a.date)-new Date(b.date))/86400000);
     if (a.account_id!==b.account_id && days<=4 && Math.abs(a.amount+b.amount)<0.01 && !a.transfer_pair_id && !b.transfer_pair_id) {
-      db.prepare("UPDATE transactions SET kind='transfer',category='Credit Card Payment',transfer_pair_id=? WHERE id=?").run(b.id,a.id);
-      db.prepare("UPDATE transactions SET kind='transfer',category='Credit Card Payment',transfer_pair_id=? WHERE id=?").run(a.id,b.id);
+      db.prepare("UPDATE transactions SET category='Credit Card Payment',transfer_pair_id=? WHERE id=?").run(b.id,a.id);
+      db.prepare("UPDATE transactions SET category='Credit Card Payment',transfer_pair_id=? WHERE id=?").run(a.id,b.id);
       a.transfer_pair_id=b.id; b.transfer_pair_id=a.id; matched++;
     }
   }

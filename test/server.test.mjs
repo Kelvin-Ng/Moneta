@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const port=4199;
 const plaidPort=4200;
@@ -98,18 +99,22 @@ test("a fresh database is empty until demo data is explicitly generated",async()
   assert.equal(repeated.accounts_added,0);
   assert.equal(repeated.transactions_added,0);
 
-  const res=await fetch(`http://localhost:${port}/api/bootstrap?kinds=income,expense,investment`);
+  const res=await fetch(`http://localhost:${port}/api/bootstrap`);
   assert.equal(res.status,200);
   const data=await res.json();
   assert.ok(data.accounts.length>=4);
   assert.ok(data.transactions.length>10);
   assert.ok(data.summary.totals.income>0);
   assert.ok(data.summary.totals.expense>0);
-  assert.equal(data.transactions.some(t=>t.kind==="transfer"),false);
+  assert.equal(data.transactions.some(transaction=>Object.hasOwn(transaction,"kind")),false);
+  assert.ok(data.transactions.some(transaction=>transaction.category_group==="Transfers"));
   assert.ok(data.category_groups.find(group=>group.name==="Income").categories.includes("Dividends & Capital Gains"));
   assert.ok(data.category_groups.find(group=>group.name==="Food & Dining").categories.includes("Groceries"));
   assert.equal(data.transactions.find(transaction=>transaction.category==="Groceries")?.category_group,"Food & Dining");
   assert.equal(data.summary.categories.find(category=>category.name==="Groceries")?.group,"Food & Dining");
+  const database=new DatabaseSync(join(temp,"test.db"));
+  assert.equal(database.prepare("PRAGMA table_info(transactions)").all().some(column=>column.name==="kind"),false);
+  database.close();
 });
 
 test("transfer matching endpoint is safe to run repeatedly",async()=>{
@@ -117,6 +122,35 @@ test("transfer matching endpoint is safe to run repeatedly",async()=>{
   const two=await fetch(`http://localhost:${port}/api/detect-transfers`,{method:"POST"});
   assert.equal(one.status,200);assert.equal(two.status,200);
   assert.equal((await two.json()).matched,0);
+});
+
+test("category groups classify transactions and positive expenses reduce totals",async()=>{
+  const accountResponse=await fetch(`http://localhost:${port}/api/accounts`,{
+    method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({institution:"Classification Test",name:"Signed Amounts",type:"cash",balance:0})
+  });
+  const accountId=(await accountResponse.json()).id;
+  for(const transaction of [
+    {merchant:"Groceries",amount:-100,category:"Groceries"},
+    {merchant:"Grocery refund",amount:20,category:"Groceries"},
+    {merchant:"Paycheck",amount:500,category:"Paychecks"},
+    {merchant:"Move money",amount:-50,category:"Transfer"}
+  ]){
+    const response=await fetch(`http://localhost:${port}/api/transactions`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({account_id:accountId,date:"2026-08-01",...transaction})
+    });
+    assert.equal(response.status,201);
+  }
+  const data=await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json();
+  assert.equal(data.summary.totals.income,500);
+  assert.equal(data.summary.totals.expense,80);
+  assert.equal(data.summary.totals.transfer,-50);
+  assert.equal(data.summary.totals.net,420);
+  assert.equal(data.summary.categories.find(category=>category.name==="Groceries").value,80);
+  assert.deepEqual(new Set(data.transactions.map(transaction=>transaction.category_group)),new Set(["Income","Food & Dining","Transfers"]));
+  assert.ok(data.transactions.every(transaction=>!Object.hasOwn(transaction,"kind")));
+  await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
 });
 
 test("static app is served",async()=>{
@@ -155,7 +189,7 @@ test("daily net worth history can be filtered to an account",async()=>{
   const date=value=>value.toISOString().slice(0,10);
   const tx=await fetch(`http://localhost:${port}/api/transactions`,{
     method:"POST",headers:{"content-type":"application/json"},
-    body:JSON.stringify({account_id:accountId,date:date(today),merchant:"Daily expense",amount:10,kind:"expense",category:"Miscellaneous"})
+    body:JSON.stringify({account_id:accountId,date:date(today),merchant:"Daily expense",amount:-10,category:"Miscellaneous"})
   });
   assert.equal(tx.status,201);
   const res=await fetch(`http://localhost:${port}/api/net-worth?from=${date(yesterday)}&to=${date(today)}&accounts=${accountId}`);
@@ -171,7 +205,7 @@ test("daily net worth history can be filtered to an account",async()=>{
 });
 
 test("report views persist configuration without calculated values",async()=>{
-  const configuration={version:1,filters:{range:"custom",from:"2026-06-01",to:"2026-06-30",kinds:["income","expense"],accounts:[1],categories:["Groceries"],search:"market"}};
+  const configuration={version:1,filters:{range:"custom",from:"2026-06-01",to:"2026-06-30",accounts:[1],categories:["Groceries"],search:"market"}};
   const create=await fetch(`http://localhost:${port}/api/views`,{
     method:"POST",headers:{"content-type":"application/json"},
     body:JSON.stringify({name:"June essentials",configuration})
@@ -202,7 +236,7 @@ test("accounts can be removed along with their local transactions",async()=>{
   const accountId=(await accountRes.json()).id;
   const txRes=await fetch(`http://localhost:${port}/api/transactions`,{
     method:"POST",headers:{"content-type":"application/json"},
-    body:JSON.stringify({account_id:accountId,date:"2026-07-08",merchant:"Test Expense",amount:12,kind:"expense",category:"Miscellaneous"})
+    body:JSON.stringify({account_id:accountId,date:"2026-07-08",merchant:"Test Expense",amount:-12,category:"Miscellaneous"})
   });
   assert.equal(txRes.status,201);
   const txId=(await txRes.json()).id;
@@ -210,7 +244,7 @@ test("accounts can be removed along with their local transactions",async()=>{
   const removed=await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
   assert.equal(removed.status,200);
   assert.equal((await removed.json()).transactions_deleted,1);
-  const data=await (await fetch(`http://localhost:${port}/api/bootstrap?kinds=income,expense,investment,transfer`)).json();
+  const data=await (await fetch(`http://localhost:${port}/api/bootstrap`)).json();
   assert.equal(data.accounts.some(account=>account.id===accountId),false);
   assert.equal(data.transactions.some(tx=>tx.id===txId),false);
 });
@@ -231,6 +265,10 @@ test("investment-only Plaid items sync successfully without a Transactions curso
   assert.equal(item.error_code,null);
   const bootstrap=await (await fetch(`http://localhost:${port}/api/bootstrap`)).json();
   assert.ok(bootstrap.accounts.some(account=>account.external_account_id==="investment-test"));
+  const investmentTransaction=bootstrap.transactions.find(transaction=>transaction.external_id==="plaid:investment-tx-test");
+  assert.equal(investmentTransaction.category,"Buy");
+  assert.equal(investmentTransaction.category_group,"Transfers");
+  assert.equal(Object.hasOwn(investmentTransaction,"kind"),false);
   const today=new Date(),yesterday=new Date(today);yesterday.setUTCDate(today.getUTCDate()-1);
   const history=await (await fetch(`http://localhost:${port}/api/net-worth?from=${yesterday.toISOString().slice(0,10)}&to=${today.toISOString().slice(0,10)}&accounts=${bootstrap.accounts.find(account=>account.external_account_id==="investment-test").id}`)).json();
   assert.equal(history.history[0].value,20000);
@@ -257,12 +295,12 @@ test("Plaid Link token, exchange, account persistence, and transaction sync work
   assert.equal(result.accounts,2);
   assert.equal(result.sync.pending,true);
 
-  const inProgress=await (await fetch(`http://localhost:${port}/api/bootstrap?from=2026-07-01&to=2026-07-31&kinds=income,expense`)).json();
+  const inProgress=await (await fetch(`http://localhost:${port}/api/bootstrap?from=2026-07-01&to=2026-07-31`)).json();
   assert.equal(inProgress.accounts.find(account=>account.external_account_id==="checking-test").plaid_status,"syncing");
   let data;
   for(let attempt=0;attempt<20;attempt++){
     await new Promise(resolve=>setTimeout(resolve,25));
-    data=await (await fetch(`http://localhost:${port}/api/bootstrap?from=2026-07-01&to=2026-07-31&kinds=income,expense`)).json();
+    data=await (await fetch(`http://localhost:${port}/api/bootstrap?from=2026-07-01&to=2026-07-31`)).json();
     if(data.accounts.find(account=>account.external_account_id==="checking-test")?.plaid_status==="connected")break;
   }
   plaidSyncDelay=0;
@@ -272,6 +310,8 @@ test("Plaid Link token, exchange, account persistence, and transaction sync work
   assert.equal(credit.balance,-325);
   assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-out").amount,-42.5);
   assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-in").amount,2000);
+  assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-out").category_group,"Food & Dining");
+  assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-in").category_group,"Income");
 
   plaidSyncDelay=120;
   const sync=await fetch(`http://localhost:${port}/api/plaid/sync`,{
@@ -296,7 +336,7 @@ test("Plaid Link token, exchange, account persistence, and transaction sync work
     method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({item_id:result.item_id})
   });
   assert.equal(syncAfterDelete.status,200);
-  const afterDelete=await (await fetch(`http://localhost:${port}/api/bootstrap?from=2026-07-01&to=2026-07-31&kinds=income,expense`)).json();
+  const afterDelete=await (await fetch(`http://localhost:${port}/api/bootstrap?from=2026-07-01&to=2026-07-31`)).json();
   assert.equal(afterDelete.accounts.some(account=>account.external_account_id==="checking-test"),false);
   assert.equal(afterDelete.accounts.some(account=>account.external_account_id==="credit-test"),true);
   assert.equal(afterDelete.transactions.some(tx=>tx.external_id==="plaid:tx-out"),false);

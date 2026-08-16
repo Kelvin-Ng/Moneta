@@ -78,9 +78,9 @@
           <div class="kpi-foot"><span class="trend down">↓ 7.2%</span><span>vs. prior period</span></div>
         </article>
         <article class="kpi">
-          <div class="kpi-label"><i class="dot invested"></i>Invested</div>
-          <div class="kpi-value" id="investedValue">$0</div>
-          <div class="kpi-foot"><span class="muted">Automated & manual</span></div>
+          <div class="kpi-label"><i class="dot invested"></i>Net transfers</div>
+          <div class="kpi-value" id="transferValue">$0</div>
+          <div class="kpi-foot"><span class="muted">Transfer-group activity</span></div>
         </article>
       </div>
 
@@ -95,7 +95,7 @@
         <article class="card spending-card">
           <div class="card-heading"><div><h2>Spending</h2><p>By category</p></div><button class="text-btn" id="insightsBtn">View insights →</button></div>
           <div class="donut-area">
-            <div class="donut" id="donut"><div><strong id="donutTotal">$0</strong><span>total spent</span></div></div>
+            <div class="donut" id="donut"><div><strong id="donutTotal">$0</strong><span>net expenses</span></div></div>
             <div class="category-list" id="categoryList"></div>
           </div>
         </article>
@@ -122,7 +122,7 @@
         <div class="cashflow-bar-wrap"><div class="cashflow-chart-scroll"><svg id="cashflowBarChart" role="img" aria-label="Monthly income, expense, and net-income chart"></svg></div><div class="cashflow-bar-tooltip" id="cashflowBarTooltip" role="status" hidden></div></div>
         <section class="sankey-details cashflow-month-details" id="cashflowMonthDetails" hidden>
           <div class="sankey-details-heading"><div><p class="eyebrow">SELECTED MONTH</p><h2 id="cashflowMonthDetailsTitle">Transactions</h2><p id="cashflowMonthDetailsSummary"></p></div></div>
-          <div class="sankey-table-scroll" id="cashflowMonthDetailsTable"><table><thead><tr><th>Date</th><th>Description</th><th>Group</th><th>Category</th><th>Account</th><th>Type</th><th class="right">Amount</th></tr></thead><tbody id="cashflowMonthDetailsRows"></tbody></table></div>
+          <div class="sankey-table-scroll" id="cashflowMonthDetailsTable"><table><thead><tr><th>Date</th><th>Description</th><th>Group</th><th>Category</th><th>Account</th><th class="right">Amount</th></tr></thead><tbody id="cashflowMonthDetailsRows"></tbody></table></div>
           <div class="sankey-details-empty" id="cashflowMonthDetailsEmpty" hidden>No income or expense transactions in this month.</div>
         </section>
       </article>
@@ -201,7 +201,7 @@
         <div class="table-actions"><button class="quiet-btn" id="importBtn">⇧ Import CSV</button><button class="text-btn" id="seeAllBtn">See all →</button></div>
       </div>
       <div class="table-scroll">
-        <table><thead><tr><th><input type="checkbox" aria-label="Select all"></th><th>Date</th><th>Description</th><th>Category</th><th>Account</th><th>Type</th><th class="right">Amount</th><th></th></tr></thead><tbody id="transactionRows"></tbody></table>
+        <table><thead><tr><th><input type="checkbox" aria-label="Select all"></th><th>Date</th><th>Description</th><th>Category</th><th>Account</th><th class="right">Amount</th><th></th></tr></thead><tbody id="transactionRows"></tbody></table>
       </div>
       <div class="empty-state" id="emptyState"><div>⌕</div><h3>No transactions found</h3><p>Try widening your date range or clearing a filter.</p><button class="quiet-btn" id="clearFiltersBtn">Clear filters</button></div>
     </section>
@@ -211,7 +211,6 @@
   <aside class="filter-panel" id="filterPanel">
     <div class="panel-header"><div><h2>Filters</h2><p>Refine every number on the page</p></div><button class="close-btn" data-close>×</button></div>
     <div class="filter-group"><label>Custom date range</label><div class="date-inputs"><input type="date" id="fromDate"><span>to</span><input type="date" id="toDate"></div></div>
-    <div class="filter-group"><label>Show activity</label><div id="kindChecks" class="check-list"></div></div>
     <div class="filter-group"><label>Accounts</label><div id="accountChecks" class="check-list"></div></div>
     <div class="filter-group"><label>Categories</label><div id="categoryChecks" class="check-list compact"></div></div>
     <div class="panel-actions"><button class="quiet-btn" id="resetFilters">Reset</button><button class="primary-btn" id="applyFilters">Apply filters</button></div>
@@ -219,16 +218,10 @@
 
   <dialog id="transactionDialog">
     <form method="dialog" id="transactionForm">
-      <div class="panel-header"><div><h2>Add transaction</h2><p>Record income, spending, transfers, or investments</p></div><button class="close-btn" value="cancel">×</button></div>
-      <div class="type-picker">
-        <label><input type="radio" name="kind" value="expense" checked><span>Expense</span></label>
-        <label><input type="radio" name="kind" value="income"><span>Income</span></label>
-        <label><input type="radio" name="kind" value="investment"><span>Investment</span></label>
-        <label><input type="radio" name="kind" value="transfer"><span>Transfer</span></label>
-      </div>
+      <div class="panel-header"><div><h2>Add transaction</h2><p>The category group determines whether this is income, an expense, or a transfer.</p></div><button class="close-btn" value="cancel">×</button></div>
       <div class="form-grid">
         <label class="full">Description<input required name="merchant" placeholder="e.g. Neighborhood market"></label>
-        <label>Amount<input required name="amount" type="number" min="0" step="0.01" placeholder="0.00"></label>
+        <label>Signed amount<input required name="amount" type="number" step="0.01" placeholder="-45.00"><span>Positive for money in or credits; negative for money out or charges.</span></label>
         <label>Date<input required name="date" type="date"></label>
         <label>Category<select required name="category" id="categorySelect"></select></label>
         <label>Account<select required name="account_id" id="accountSelect"></select></label>
@@ -256,7 +249,7 @@
 
   <dialog id="importDialog">
     <form method="dialog" id="importForm">
-      <div class="panel-header"><div><h2>Import transactions</h2><p>CSV columns: date, merchant, amount, category, kind</p></div><button class="close-btn" value="cancel">×</button></div>
+      <div class="panel-header"><div><h2>Import transactions</h2><p>CSV columns: date, merchant, amount, category</p></div><button class="close-btn" value="cancel">×</button></div>
       <label class="upload-box"><input type="file" id="csvFile" accept=".csv,text/csv"><span>⇧</span><strong>Choose a CSV file</strong><small>Duplicate rows are safely skipped</small></label>
       <label class="select-label">Import into<select id="importAccount"></select></label>
       <div class="dedupe-note"><span>↔</span><div><strong>Transfer matching is automatic</strong><p>Matching bank withdrawals and card payments are paired and excluded from expenses.</p></div></div>

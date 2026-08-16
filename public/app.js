@@ -2,7 +2,7 @@ const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const fmt = (n, compact=false) => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:compact?0:2,notation:compact&&Math.abs(n)>9999?"compact":"standard"}).format(n);
 const iso = d => d.toISOString().slice(0,10);
-const state = {accounts:[],transactions:[],categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,snapshot_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",kinds:new Set(["income","expense","investment"]),accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
+const state = {accounts:[],transactions:[],categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,snapshot_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
 const colors=["#e97567","#6d5dfc","#e6a04b","#28a792","#9f938c","#60a5c5","#d577aa"];
 const sectionPaths={overview:"/overview",cashflow:"/cash-flow",networth:"/net-worth",transactions:"/transactions",accounts:"/accounts",insights:"/insights",settings:"/settings"};
 const pathSections=Object.fromEntries(Object.entries(sectionPaths).map(([section,path])=>[path,section]));
@@ -42,8 +42,6 @@ function queryString() {
   const p=new URLSearchParams();
   if(state.filters.from)p.set("from",state.filters.from);
   if(state.filters.to)p.set("to",state.filters.to);
-  if(state.filters.kinds.size)p.set("kinds",[...state.filters.kinds].join(","));
-  else p.set("kinds","__none__");
   if(state.filters.accounts.size)p.set("accounts",[...state.filters.accounts].join(","));
   if(state.filters.categories.size)p.set("categories",[...state.filters.categories].join(","));
   if(state.filters.search)p.set("search",state.filters.search);
@@ -65,7 +63,6 @@ function currentReportConfiguration(){
     range:state.range,
     from:state.filters.from,
     to:state.filters.to,
-    kinds:[...state.filters.kinds],
     accounts:[...state.filters.accounts].map(Number),
     categories:[...state.filters.categories],
     search:state.filters.search
@@ -82,7 +79,6 @@ function applyReportConfiguration(configuration,{rebuild=true}={}){
     $("#fromDate").value=state.filters.from;$("#toDate").value=state.filters.to;
     updateDateLabel();
   }
-  state.filters.kinds=new Set(Array.isArray(filters.kinds)?filters.kinds:["income","expense","investment"]);
   state.filters.accounts=new Set((filters.accounts||[]).map(String));
   state.filters.categories=new Set(filters.categories||[]);
   state.filters.search=String(filters.search||"");
@@ -93,7 +89,6 @@ function applyReportConfiguration(configuration,{rebuild=true}={}){
 function applyDefaultReportConfiguration(){
   applyReportConfiguration({version:1,filters:{
     range:"quarter",
-    kinds:["income","expense","investment"],
     accounts:[],
     categories:[],
     search:""
@@ -117,10 +112,8 @@ function reportSettingsSummary(){
   const filter=currentReportConfiguration().filters;
   const range=filter.range==="custom"?$("#dateLabel").textContent:{month:"This month",quarter:"Rolling 3 months",year:"This year",all:"All time"}[filter.range]||$("#dateLabel").textContent;
   const accountNames=filter.accounts.map(id=>state.accounts.find(account=>account.id===id)).filter(Boolean).map(account=>account.name);
-  const activity=filter.kinds.map(kind=>kind[0].toUpperCase()+kind.slice(1));
   const rows=[
     ["Date range",range],
-    ["Activity",activity.length?activity.join(", "):"None"],
     ["Accounts",accountNames.length?accountNames.join(", "):"All accounts"],
     ["Categories",filter.categories.length?`${filter.categories.length} selected`:"All categories"],
     ["Search",filter.search||"Any description"]
@@ -183,7 +176,7 @@ function render(){
   $("#netValue").textContent=fmt(totals.net);
   $("#incomeValue").textContent=fmt(totals.income);
   $("#expenseValue").textContent=fmt(totals.expense);
-  $("#investedValue").textContent=fmt(totals.investment);
+  $("#transferValue").textContent=fmt(totals.transfer);
   $("#donutTotal").textContent=fmt(totals.expense,true);
   renderChart();renderCategories();renderTransactions();renderInsights();renderCashFlow();renderNetWorth();updateFilterCount();
 }
@@ -192,24 +185,24 @@ function renderChart(){
   const svg=$("#flowChart"), data=state.summary.months;
   const W=700,H=220,pad={l:42,r:10,t:12,b:30};
   if(!data.length){svg.innerHTML=`<text x="50%" y="50%" text-anchor="middle" class="axis-label">No data in this range</text>`;return}
-  const max=Math.max(1,...data.flatMap(d=>[d.income,d.expense]));
+  const min=Math.min(0,...data.flatMap(d=>[d.income,d.expense])),max=Math.max(1,...data.flatMap(d=>[d.income,d.expense]));
   const x=i=>pad.l+(data.length===1?(W-pad.l-pad.r)/2:i*(W-pad.l-pad.r)/(data.length-1));
-  const y=v=>pad.t+(H-pad.t-pad.b)*(1-v/max);
+  const y=v=>pad.t+(H-pad.t-pad.b)*(max-v)/(max-min),zeroY=y(0);
   const line=key=>data.map((d,i)=>`${i?"L":"M"} ${x(i)} ${y(d[key])}`).join(" ");
   let html="";
-  for(let i=0;i<4;i++){const val=max*(3-i)/3, yy=y(val);html+=`<line x1="${pad.l}" y1="${yy}" x2="${W-pad.r}" y2="${yy}" class="grid-line"/><text x="0" y="${yy+3}" class="axis-label">${val>999?`$${(val/1000).toFixed(0)}k`:`$${val.toFixed(0)}`}</text>`}
+  for(let i=0;i<4;i++){const val=min+(max-min)*(3-i)/3, yy=y(val);html+=`<line x1="${pad.l}" y1="${yy}" x2="${W-pad.r}" y2="${yy}" class="grid-line"/><text x="0" y="${yy+3}" class="axis-label">${fmt(val,true)}</text>`}
   data.forEach((d,i)=>html+=`<text x="${x(i)}" y="${H-5}" text-anchor="middle" class="axis-label">${new Date(`${d.month}-02`).toLocaleDateString("en-US",{month:"short"})}</text>`);
   html+=`<defs><linearGradient id="incomeFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#28a792"/><stop offset="1" stop-color="#28a792" stop-opacity="0"/></linearGradient></defs>`;
-  html+=`<path d="${line("income")} L ${x(data.length-1)} ${H-pad.b} L ${x(0)} ${H-pad.b} Z" fill="url(#incomeFill)" class="chart-area"/>`;
+  html+=`<path d="${line("income")} L ${x(data.length-1)} ${zeroY} L ${x(0)} ${zeroY} Z" fill="url(#incomeFill)" class="chart-area"/>`;
   html+=`<path d="${line("income")}" stroke="#28a792" class="chart-line"/><path d="${line("expense")}" stroke="#e97567" class="chart-line"/>`;
   data.forEach((d,i)=>html+=`<circle cx="${x(i)}" cy="${y(d.income)}" r="3" fill="#fff" stroke="#28a792" stroke-width="2"/><circle cx="${x(i)}" cy="${y(d.expense)}" r="3" fill="#fff" stroke="#e97567" stroke-width="2"/>`);
   svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.innerHTML=html;
 }
 
 function renderCategories(){
-  const cats=state.summary.categories.slice(0,5),total=state.summary.totals.expense||1;
+  const cats=state.summary.categories.slice(0,5),pieCategories=cats.filter(category=>category.value>0),total=pieCategories.reduce((sum,category)=>sum+category.value,0)||1;
   let acc=0,stops=[];
-  cats.forEach((c,i)=>{const from=acc,to=acc+c.value/total*100;stops.push(`${colors[i]} ${from}% ${to}%`);acc=to});
+  pieCategories.forEach((c,i)=>{const from=acc,to=acc+c.value/total*100;stops.push(`${colors[i]} ${from}% ${to}%`);acc=to});
   if(acc<100)stops.push(`#e9e6df ${acc}% 100%`);
   $("#donut").style.background=`conic-gradient(${stops.join(",")})`;
   $("#categoryList").innerHTML=cats.map((c,i)=>`<div class="category-row"><i style="background:${colors[i]}"></i><span>${escapeHtml(c.name)}</span><strong>${fmt(c.value,true)}</strong></div>`).join("")||`<small class="muted">No expenses to show</small>`;
@@ -220,8 +213,8 @@ function renderTransactions(){
   const rows=state.section==="transactions"?state.transactions:state.transactions.slice(0,7);
   $("#transactionRows").innerHTML=rows.map(tx=>{
     const initial=tx.merchant.replace(/[^a-z0-9 ]/gi,"").split(" ").map(x=>x[0]).join("").slice(0,2).toUpperCase();
-    const amount=tx.kind==="expense"?fmt(tx.amount):tx.kind==="income"?`+${fmt(tx.amount)}`:fmt(tx.amount);
-    return `<tr><td><input type="checkbox" aria-label="Select ${escapeHtml(tx.merchant)}"></td><td>${new Date(`${tx.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</td><td><div class="merchant"><span class="merchant-icon">${initial}</span><div><strong>${escapeHtml(tx.merchant)}</strong><small>${tx.pending?"Pending":"Posted"}</small></div></div></td><td><div class="category-hierarchy"><small>${escapeHtml(tx.category_group||groupForCategory(tx.category,tx.kind))}</small><span class="category-chip">${escapeHtml(tx.category)}</span></div></td><td>${escapeHtml(tx.account_name)}</td><td><span class="type-chip ${tx.kind}">${tx.kind}</span></td><td class="right amount ${tx.kind==="income"?"positive":""}">${amount}</td><td><button class="row-menu" data-delete="${tx.id}" title="Delete">×</button></td></tr>`
+    const amount=Number(tx.amount)||0,formatted=amount>0?`+${fmt(amount)}`:fmt(amount);
+    return `<tr><td><input type="checkbox" aria-label="Select ${escapeHtml(tx.merchant)}"></td><td>${new Date(`${tx.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</td><td><div class="merchant"><span class="merchant-icon">${initial}</span><div><strong>${escapeHtml(tx.merchant)}</strong><small>${tx.pending?"Pending":"Posted"}</small></div></div></td><td><div class="category-hierarchy"><small>${escapeHtml(tx.category_group||groupForCategory(tx.category))}</small><span class="category-chip">${escapeHtml(tx.category)}</span></div></td><td>${escapeHtml(tx.account_name)}</td><td class="right amount ${amount>0?"positive":""}">${formatted}</td><td><button class="row-menu" data-delete="${tx.id}" title="Delete">×</button></td></tr>`
   }).join("");
   $("#emptyState").classList.toggle("show",!rows.length);
   $(".table-scroll").style.display=rows.length?"block":"none";
@@ -265,8 +258,8 @@ function renderSettings(){
 }
 
 function renderInsights(){
-  const total=state.summary.totals.expense||1;
-  $("#insightsGrid").innerHTML=state.summary.categories.map((c,i)=>`<article class="insight-card"><small>${escapeHtml(c.group||groupForCategory(c.name,"expense"))} › ${escapeHtml(c.name)}</small><div><strong>${fmt(c.value)}</strong></div><div class="bar"><i style="width:${c.value/total*100}%;background:${colors[i%colors.length]}"></i></div><small>${(c.value/total*100).toFixed(1)}% of total spending</small></article>`).join("")||`<article class="insight-card"><strong>No expense data</strong><small>Adjust your filters to see insights.</small></article>`;
+  const categories=state.summary.categories,max=Math.max(1,...categories.map(category=>Math.abs(category.value))),total=Math.abs(state.summary.totals.expense)||1;
+  $("#insightsGrid").innerHTML=categories.map((c,i)=>`<article class="insight-card"><small>${escapeHtml(c.group||groupForCategory(c.name))} › ${escapeHtml(c.name)}</small><div><strong>${fmt(c.value)}</strong></div><div class="bar"><i style="width:${Math.abs(c.value)/max*100}%;background:${c.value<0?"#28a792":colors[i%colors.length]}"></i></div><small>${(c.value/total*100).toFixed(1)}% of net expenses${c.value<0?" · net credit":""}</small></article>`).join("")||`<article class="insight-card"><strong>No expense data</strong><small>Adjust your filters to see insights.</small></article>`;
 }
 
 function renderNetWorth(){
@@ -341,19 +334,17 @@ function updateNetWorthHover(event){
   tooltip.style.left=`${left}px`;tooltip.style.top=`${top}px`;
 }
 
-function groupForCategory(category,kind){
-  return state.categoryGroups.find(group=>group.categories.includes(category))?.name||(kind==="income"?"Income":kind==="transfer"||kind==="investment"?"Transfers":"Other");
-}
+function groupForCategory(category){return state.categoryGroups.find(group=>group.categories.includes(category))?.name||"Other"}
+function transactionClass(transaction){const group=transaction.category_group||groupForCategory(transaction.category);return group==="Income"?"income":group==="Transfers"?"transfer":"expense"}
 
 function cashFlowData(){
   const income=new Map(),expenses=new Map();
   for(const tx of state.transactions){
-    const value=tx.kind==="expense"?Math.abs(Number(tx.amount)||0):Number(tx.amount)||0;
-    const group=tx.category_group||groupForCategory(tx.category,tx.kind);
-    if(tx.kind==="income"&&value>0){const key=`${group}\u0000${tx.category}`;income.set(key,(income.get(key)||0)+value)}
-    if(tx.kind==="expense"&&value>0){const key=`${group}\u0000${tx.category}`;expenses.set(key,(expenses.get(key)||0)+value)}
+    const amount=Number(tx.amount)||0,group=tx.category_group||groupForCategory(tx.category),classification=transactionClass(tx);
+    if(classification==="income"){const key=`${group}\u0000${tx.category}`;income.set(key,(income.get(key)||0)+amount)}
+    if(classification==="expense"){const key=`${group}\u0000${tx.category}`;expenses.set(key,(expenses.get(key)||0)-amount)}
   }
-  const sorted=map=>[...map].map(([key,value])=>{const [group,name]=key.split("\u0000");return {name,group,value}}).sort((a,b)=>b.value-a.value);
+  const sorted=map=>[...map].map(([key,value])=>{const [group,name]=key.split("\u0000");return {name,group,value}}).filter(item=>item.value>0).sort((a,b)=>b.value-a.value);
   return {income:sorted(income),expenses:sorted(expenses)};
 }
 
@@ -372,20 +363,20 @@ function renderCashFlow(){
   renderCashFlowBars();renderCashFlowMonthDetails();renderSankey();renderSankeyDetails();
 }
 
-function sankeyControl(scope,item,kind,markup,className){
+function sankeyControl(scope,item,side,markup,className){
   const group=scope==="group"?item.name:item.group;
   if(item.synthetic){
     if(item.name!=="Net savings")return markup;
-    return `<g class="${className} sankey-hover-only" data-sankey-scope="${scope}" data-sankey-name="${escapeHtml(item.name)}" data-sankey-group="${escapeHtml(group)}" data-sankey-kind="${kind}" data-sankey-clickable="false" aria-label="${escapeHtml(item.name)}">${markup}<title>${escapeHtml(item.name)}</title></g>`;
+    return `<g class="${className} sankey-hover-only" data-sankey-scope="${scope}" data-sankey-name="${escapeHtml(item.name)}" data-sankey-group="${escapeHtml(group)}" data-sankey-side="${side}" data-sankey-clickable="false" aria-label="${escapeHtml(item.name)}">${markup}<title>${escapeHtml(item.name)}</title></g>`;
   }
   const selection=state.sankeySelection;
-  const selected=selection?.scope===scope&&selection?.name===item.name&&selection?.kind===kind;
-  const selectionRelated=selection?.kind===kind&&(selection.scope==="group"
+  const selected=selection?.scope===scope&&selection?.name===item.name&&selection?.side===side;
+  const selectionRelated=selection?.side===side&&(selection.scope==="group"
     ? group===selection.group
     : (scope==="category"&&item.name===selection.name)||(scope==="group"&&item.name===selection.group));
-  return `<g class="${className}${selected?" selected":""}${selectionRelated?" selection-related":""}" data-sankey-scope="${scope}" data-sankey-name="${escapeHtml(item.name)}" data-sankey-group="${escapeHtml(group)}" data-sankey-kind="${kind}" role="button" tabindex="0" aria-label="Show transactions for ${escapeHtml(item.name)}">${markup}<title>Show transactions for ${escapeHtml(item.name)}</title></g>`;
+  return `<g class="${className}${selected?" selected":""}${selectionRelated?" selection-related":""}" data-sankey-scope="${scope}" data-sankey-name="${escapeHtml(item.name)}" data-sankey-group="${escapeHtml(group)}" data-sankey-side="${side}" role="button" tabindex="0" aria-label="Show transactions for ${escapeHtml(item.name)}">${markup}<title>Show transactions for ${escapeHtml(item.name)}</title></g>`;
 }
-function sankeyNode(scope,item,kind,markup){return sankeyControl(scope,item,kind,markup,"sankey-node")}
+function sankeyNode(scope,item,side,markup){return sankeyControl(scope,item,side,markup,"sankey-node")}
 
 function indexSankeyControls(svg){
   sankeyHovered.forEach(element=>element.classList.remove("related"));
@@ -393,10 +384,10 @@ function indexSankeyControls(svg){
   const byGroup=new Map(),byCategory=new Map(),groupControls=new Map();
   const add=(map,key,element)=>{if(!map.has(key))map.set(key,[]);map.get(key).push(element)};
   svg.querySelectorAll("[data-sankey-scope]").forEach(element=>{
-    const {sankeyScope:scope,sankeyName:name,sankeyGroup:group,sankeyKind:kind}=element.dataset;
-    add(byGroup,`${kind}\u0000${group}`,element);
-    if(scope==="category")add(byCategory,`${kind}\u0000${name}`,element);
-    else add(groupControls,`${kind}\u0000${name}`,element);
+    const {sankeyScope:scope,sankeyName:name,sankeyGroup:group,sankeySide:side}=element.dataset;
+    add(byGroup,`${side}\u0000${group}`,element);
+    if(scope==="category")add(byCategory,`${side}\u0000${name}`,element);
+    else add(groupControls,`${side}\u0000${name}`,element);
   });
   sankeyHoverIndex={byGroup,byCategory,groupControls};
 }
@@ -405,21 +396,21 @@ function setSankeyHover(control,active){
   const scope=active&&control?control.dataset.sankeyScope:"";
   const name=active&&control?control.dataset.sankeyName:"";
   const group=active&&control?control.dataset.sankeyGroup:"";
-  const kind=active&&control?control.dataset.sankeyKind:"";
-  const nextKey=active?`${kind}\u0000${scope}\u0000${name}`:"";
+  const side=active&&control?control.dataset.sankeySide:"";
+  const nextKey=active?`${side}\u0000${scope}\u0000${name}`:"";
   if(nextKey===sankeyHoverKey)return;
   sankeyHovered.forEach(element=>element.classList.remove("related"));
   sankeyHoverKey=nextKey;
   if(!active){sankeyHovered=[];return}
   sankeyHovered=scope==="group"
-    ? (sankeyHoverIndex.byGroup.get(`${kind}\u0000${group}`)||[])
-    : [...(sankeyHoverIndex.byCategory.get(`${kind}\u0000${name}`)||[]),...(sankeyHoverIndex.groupControls.get(`${kind}\u0000${group}`)||[])];
+    ? (sankeyHoverIndex.byGroup.get(`${side}\u0000${group}`)||[])
+    : [...(sankeyHoverIndex.byCategory.get(`${side}\u0000${name}`)||[]),...(sankeyHoverIndex.groupControls.get(`${side}\u0000${group}`)||[])];
   sankeyHovered.forEach(element=>element.classList.add("related"));
 }
 
 function selectSankeyNode(element){
-  const next={scope:element.dataset.sankeyScope,name:element.dataset.sankeyName,group:element.dataset.sankeyGroup,kind:element.dataset.sankeyKind};
-  if(state.sankeySelection?.scope===next.scope&&state.sankeySelection?.name===next.name&&state.sankeySelection?.kind===next.kind)return clearSankeySelection();
+  const next={scope:element.dataset.sankeyScope,name:element.dataset.sankeyName,group:element.dataset.sankeyGroup,side:element.dataset.sankeySide};
+  if(state.sankeySelection?.scope===next.scope&&state.sankeySelection?.name===next.name&&state.sankeySelection?.side===next.side)return clearSankeySelection();
   state.sankeySelection=next;
   renderSankey();renderSankeyDetails();
   requestAnimationFrame(()=>$("#sankeyDetails").scrollIntoView({behavior:"smooth",block:"start"}));
@@ -434,12 +425,12 @@ function renderSankeyDetails(){
   const details=$("#sankeyDetails"),selection=state.sankeySelection;
   if(!selection){details.hidden=true;return}
   const rows=state.transactions.filter(transaction=>{
-    if(transaction.kind!==selection.kind)return false;
+    if(transactionClass(transaction)!==selection.side)return false;
     return selection.scope==="category"
       ? transaction.category===selection.name
-      : (transaction.category_group||groupForCategory(transaction.category,transaction.kind))===selection.name;
+      : (transaction.category_group||groupForCategory(transaction.category))===selection.name;
   });
-  const total=rows.reduce((sum,transaction)=>sum+Math.abs(Number(transaction.amount)||0),0);
+  const total=rows.reduce((sum,transaction)=>sum+(selection.side==="income"?Number(transaction.amount)||0:-(Number(transaction.amount)||0)),0);
   details.hidden=false;
   $("#sankeyDetailsType").textContent=`SELECTED ${selection.scope.toUpperCase()}`;
   $("#sankeyDetailsTitle").textContent=selection.name;
@@ -447,8 +438,8 @@ function renderSankeyDetails(){
   $("#sankeyDetailsTable").hidden=!rows.length;
   $("#sankeyDetailsEmpty").hidden=Boolean(rows.length);
   $("#sankeyDetailsRows").innerHTML=rows.map(transaction=>{
-    const amount=transaction.kind==="income"?`+${fmt(Math.abs(transaction.amount))}`:fmt(-Math.abs(transaction.amount));
-    return `<tr><td>${new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(transaction.merchant)}</strong>${transaction.note?`<small>${escapeHtml(transaction.note)}</small>`:""}</td><td>${escapeHtml(transaction.category_group||groupForCategory(transaction.category,transaction.kind))}</td><td><span class="category-chip">${escapeHtml(transaction.category)}</span></td><td>${escapeHtml(transaction.account_name)}</td><td class="right amount ${transaction.kind==="income"?"positive":""}">${amount}</td></tr>`;
+    const amount=Number(transaction.amount)||0,formatted=amount>0?`+${fmt(amount)}`:fmt(amount);
+    return `<tr><td>${new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(transaction.merchant)}</strong>${transaction.note?`<small>${escapeHtml(transaction.note)}</small>`:""}</td><td>${escapeHtml(transaction.category_group||groupForCategory(transaction.category))}</td><td><span class="category-chip">${escapeHtml(transaction.category)}</span></td><td>${escapeHtml(transaction.account_name)}</td><td class="right amount ${amount>0?"positive":""}">${formatted}</td></tr>`;
   }).join("");
 }
 
@@ -459,9 +450,9 @@ function cashFlowMonthLabel(month,short=false,includeYear=false){
 function renderCashFlowMonthDetails(){
   const details=$("#cashflowMonthDetails"),month=state.cashFlowMonthSelection;
   if(!month){details.hidden=true;return}
-  const rows=state.transactions.filter(transaction=>["income","expense"].includes(transaction.kind)&&transaction.date.slice(0,7)===month);
-  const income=rows.filter(transaction=>transaction.kind==="income").reduce((sum,transaction)=>sum+Math.abs(Number(transaction.amount)||0),0);
-  const expense=rows.filter(transaction=>transaction.kind==="expense").reduce((sum,transaction)=>sum+Math.abs(Number(transaction.amount)||0),0);
+  const rows=state.transactions.filter(transaction=>transactionClass(transaction)!=="transfer"&&transaction.date.slice(0,7)===month);
+  const income=rows.filter(transaction=>transactionClass(transaction)==="income").reduce((sum,transaction)=>sum+(Number(transaction.amount)||0),0);
+  const expense=rows.filter(transaction=>transactionClass(transaction)==="expense").reduce((sum,transaction)=>sum-(Number(transaction.amount)||0),0);
   const net=income-expense,rate=income?net/income*100:null;
   details.hidden=false;
   $("#cashflowMonthDetailsTitle").textContent=cashFlowMonthLabel(month);
@@ -469,8 +460,8 @@ function renderCashFlowMonthDetails(){
   $("#cashflowMonthDetailsTable").hidden=!rows.length;
   $("#cashflowMonthDetailsEmpty").hidden=Boolean(rows.length);
   $("#cashflowMonthDetailsRows").innerHTML=rows.map(transaction=>{
-    const amount=transaction.kind==="income"?`+${fmt(Math.abs(transaction.amount))}`:fmt(-Math.abs(transaction.amount));
-    return `<tr><td>${new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(transaction.merchant)}</strong>${transaction.note?`<small>${escapeHtml(transaction.note)}</small>`:""}</td><td>${escapeHtml(transaction.category_group||groupForCategory(transaction.category,transaction.kind))}</td><td><span class="category-chip">${escapeHtml(transaction.category)}</span></td><td>${escapeHtml(transaction.account_name)}</td><td><span class="type-chip ${transaction.kind}">${transaction.kind}</span></td><td class="right amount ${transaction.kind==="income"?"positive":""}">${amount}</td></tr>`;
+    const amount=Number(transaction.amount)||0,formatted=amount>0?`+${fmt(amount)}`:fmt(amount);
+    return `<tr><td>${new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(transaction.merchant)}</strong>${transaction.note?`<small>${escapeHtml(transaction.note)}</small>`:""}</td><td>${escapeHtml(transaction.category_group||groupForCategory(transaction.category))}</td><td><span class="category-chip">${escapeHtml(transaction.category)}</span></td><td>${escapeHtml(transaction.account_name)}</td><td class="right amount ${amount>0?"positive":""}">${formatted}</td></tr>`;
   }).join("");
 }
 
@@ -512,7 +503,7 @@ function renderCashFlowBars(){
   hideCashFlowBarTooltip();
   if(!data.length){cashFlowBarChartState=null;hideCashFlowBarTooltip();svg.setAttribute("viewBox","0 0 900 320");svg.style.minWidth="900px";svg.innerHTML=`<text x="450" y="155" text-anchor="middle" class="axis-label">No income or expenses in this range</text>`;return}
   const W=Math.max(900,data.length*88),H=340,pad={l:68,r:26,t:26,b:52};
-  const netValues=data.map(month=>month.income-month.expense),domainMin=Math.min(0,...netValues),domainMax=Math.max(1,...data.flatMap(month=>[month.income,month.expense]),...netValues);
+  const netValues=data.map(month=>month.income-month.expense),domainMin=Math.min(0,...data.flatMap(month=>[month.income,month.expense]),...netValues),domainMax=Math.max(1,...data.flatMap(month=>[month.income,month.expense]),...netValues);
   const plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b,groupW=plotW/data.length,barW=Math.min(26,groupW*.28);
   const y=value=>pad.t+plotH*(domainMax-value)/(domainMax-domainMin),zeroY=y(0);
   let html="";
@@ -522,7 +513,7 @@ function renderCashFlowBars(){
   }
   data.forEach((month,index)=>{
     const center=pad.l+groupW*(index+.5),incomeY=y(month.income),expenseY=y(month.expense),label=cashFlowMonthLabel(month.month,true,data.length>12),selected=state.cashFlowMonthSelection===month.month;
-    html+=`<g class="cashflow-month-group${selected?" selected":""}" data-cashflow-month="${month.month}" data-cashflow-index="${index}" role="button" tabindex="0" aria-label="Show transactions for ${cashFlowMonthLabel(month.month)}">${selected?`<rect class="cashflow-month-selection" x="${pad.l+groupW*index+3}" y="${pad.t}" width="${Math.max(1,groupW-6)}" height="${plotH}" rx="8"/>`:""}<rect class="cashflow-income-bar" x="${center-barW-2}" y="${incomeY}" width="${barW}" height="${Math.max(0,zeroY-incomeY)}" rx="4"/><rect class="cashflow-expense-bar" x="${center+2}" y="${expenseY}" width="${barW}" height="${Math.max(0,zeroY-expenseY)}" rx="4"/><text x="${center}" y="${H-17}" text-anchor="middle" class="axis-label">${label}</text><rect class="cashflow-month-hit" x="${pad.l+groupW*index}" y="${pad.t}" width="${groupW}" height="${H-pad.t-pad.b+30}" fill="transparent"/></g>`;
+    html+=`<g class="cashflow-month-group${selected?" selected":""}" data-cashflow-month="${month.month}" data-cashflow-index="${index}" role="button" tabindex="0" aria-label="Show transactions for ${cashFlowMonthLabel(month.month)}">${selected?`<rect class="cashflow-month-selection" x="${pad.l+groupW*index+3}" y="${pad.t}" width="${Math.max(1,groupW-6)}" height="${plotH}" rx="8"/>`:""}<rect class="cashflow-income-bar" x="${center-barW-2}" y="${Math.min(incomeY,zeroY)}" width="${barW}" height="${Math.abs(zeroY-incomeY)}" rx="4"/><rect class="cashflow-expense-bar" x="${center+2}" y="${Math.min(expenseY,zeroY)}" width="${barW}" height="${Math.abs(zeroY-expenseY)}" rx="4"/><text x="${center}" y="${H-17}" text-anchor="middle" class="axis-label">${label}</text><rect class="cashflow-month-hit" x="${pad.l+groupW*index}" y="${pad.t}" width="${groupW}" height="${H-pad.t-pad.b+30}" fill="transparent"/></g>`;
   });
   const line=netValues.map((value,index)=>`${index?"L":"M"} ${pad.l+groupW*(index+.5)} ${y(value)}`).join(" ");
   html+=`<path d="${line}" class="cashflow-net-line"/>`;
@@ -577,10 +568,10 @@ function renderSankey(){
   const palette=new Map();
   sourceGroups.forEach((group,i)=>palette.set(`source:${group.name}`,group.synthetic?"#9f938c":i?colors[(i+3)%colors.length]:"#28a792"));
   targetGroups.forEach((group,i)=>palette.set(`target:${group.name}`,group.synthetic?"#6d5dfc":colors[i%colors.length]));
-  const path=(x1,y1,x2,y2,width,color,title,scope,item,kind)=>{
+  const path=(x1,y1,x2,y2,width,color,title,scope,item,side)=>{
     const d=`M ${x1} ${y1} C ${x1+(x2-x1)*.46} ${y1},${x1+(x2-x1)*.54} ${y2},${x2} ${y2}`;
     const markup=`<path class="sankey-link" d="${d}" fill="none" stroke="${color}" stroke-opacity=".32" stroke-width="${Math.max(.75,width)}"/><path class="sankey-link-hit" d="${d}" fill="none" stroke="transparent" stroke-width="${Math.max(16,width)}"/>`;
-    return sankeyControl(scope,item,kind,markup,"sankey-link-control")+`<title>${escapeHtml(title)}</title>`;
+    return sankeyControl(scope,item,side,markup,"sankey-link-control")+`<title>${escapeHtml(title)}</title>`;
   };
   let html=`<defs><filter id="sankeyShadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity=".12"/></filter></defs>`;
 
@@ -628,17 +619,13 @@ function renderSankey(){
 }
 
 function buildFilterOptions(){
-  const kindNames={income:"Income",expense:"Expenses",investment:"Investments",transfer:"Transfers & card payments"};
-  $("#kindChecks").innerHTML=Object.entries(kindNames).map(([k,v])=>`<label><input type="checkbox" value="${k}" ${state.filters.kinds.has(k)?"checked":""}>${v}</label>`).join("");
   $("#accountChecks").innerHTML=state.accounts.map(a=>`<label><input type="checkbox" value="${a.id}" ${state.filters.accounts.has(String(a.id))?"checked":""}>${escapeHtml(a.institution)} · ${escapeHtml(a.name)}</label>`).join("");
-  $("#categoryChecks").innerHTML=state.categoryGroups.map((group,index)=>`<section class="category-filter-group"><label class="category-group-option"><input type="checkbox" data-category-group="${index}"><strong>${escapeHtml(group.name)}</strong><small>${escapeHtml(group.kind)}</small></label><div>${group.categories.map(category=>`<label><input type="checkbox" data-category value="${escapeHtml(category)}" ${state.filters.categories.has(category)?"checked":""}>${escapeHtml(category)}</label>`).join("")}</div></section>`).join("");
+  $("#categoryChecks").innerHTML=state.categoryGroups.map((group,index)=>`<section class="category-filter-group"><label class="category-group-option"><input type="checkbox" data-category-group="${index}"><strong>${escapeHtml(group.name)}</strong></label><div>${group.categories.map(category=>`<label><input type="checkbox" data-category value="${escapeHtml(category)}" ${state.filters.categories.has(category)?"checked":""}>${escapeHtml(category)}</label>`).join("")}</div></section>`).join("");
   renderCategorySelect();
   syncCategoryGroupChecks();
 }
-function renderCategorySelect(kind=$("[name=kind]:checked")?.value||"expense"){
-  const groupKind=kind==="investment"?"transfer":kind;
-  const groups=state.categoryGroups.filter(group=>group.kind===groupKind);
-  $("#categorySelect").innerHTML=`<option value="" selected disabled>Choose a category</option>`+groups.map(group=>`<optgroup label="${escapeHtml(group.name)}">${group.categories.map(category=>`<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`).join("")}</optgroup>`).join("");
+function renderCategorySelect(){
+  $("#categorySelect").innerHTML=`<option value="" selected disabled>Choose a category</option>`+state.categoryGroups.map(group=>`<optgroup label="${escapeHtml(group.name)}">${group.categories.map(category=>`<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`).join("")}</optgroup>`).join("");
 }
 function syncCategoryGroupChecks(){
   $$("#categoryChecks [data-category-group]").forEach(groupInput=>{
@@ -648,7 +635,7 @@ function syncCategoryGroupChecks(){
     groupInput.indeterminate=checked>0&&checked<children.length;
   });
 }
-function updateFilterCount(){const n=state.filters.accounts.size+state.filters.categories.size+(state.filters.kinds.size===3&&!state.filters.kinds.has("transfer")?0:1)+(state.filters.search?1:0);$("#filterCount").textContent=n}
+function updateFilterCount(){const n=state.filters.accounts.size+state.filters.categories.size+(state.filters.search?1:0);$("#filterCount").textContent=n}
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function toast(msg){const el=$("#toast");el.textContent=msg;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),2600)}
 
@@ -811,7 +798,6 @@ function bind(){
   $("#seeAllBtn").onclick=()=>navigateSection("transactions").catch(error=>toast(error.message));$("#insightsBtn").onclick=()=>navigateSection("insights").catch(error=>toast(error.message));$("#cashFlowBtn").onclick=()=>navigateSection("cashflow").catch(error=>toast(error.message));
   $("#mobileMenu")?.addEventListener("click",()=>$(".sidebar").classList.toggle("show"));
   $(".mobile-menu").onclick=()=>$(".sidebar").classList.toggle("show");
-  $$("[name=kind]").forEach(input=>input.onchange=()=>renderCategorySelect(input.value));
   $("#addBtn").onclick=()=>{document.querySelector("[name=date]").value=iso(new Date());$("#transactionDialog").showModal()};
   $("#connectBtn").onclick=()=>openConnectDialog();
   $$("#connectionChoices button").forEach(button=>button.onclick=e=>{
@@ -834,7 +820,6 @@ function bind(){
     detachSavedView();
     state.filters.from=$("#fromDate").value;state.filters.to=$("#toDate").value;
     state.range="custom";$$("#datePresets button").forEach(button=>button.classList.remove("active"));
-    state.filters.kinds=new Set($$("#kindChecks input:checked").map(x=>x.value));
     state.filters.accounts=new Set($$("#accountChecks input:checked").map(x=>x.value));
     state.filters.categories=new Set($$("#categoryChecks [data-category]:checked").map(x=>x.value));
     updateDateLabel();closePanel();await load();
@@ -899,8 +884,8 @@ function bind(){
 
 function parseCSV(text){
   const lines=text.trim().split(/\r?\n/).filter(Boolean), headers=splitCSV(lines.shift()).map(x=>x.trim().toLowerCase());
-  for(const required of ["date","merchant","amount"])if(!headers.includes(required))throw new Error(`CSV needs a “${required}” column`);
-  return lines.map(line=>{const vals=splitCSV(line),row={};headers.forEach((h,i)=>row[h]=vals[i]?.trim()||"");row.amount=Number(row.amount.replace(/[$,]/g,""));if(!row.date||!row.merchant||Number.isNaN(row.amount))throw new Error("One or more CSV rows is invalid");return row});
+  for(const required of ["date","merchant","amount","category"])if(!headers.includes(required))throw new Error(`CSV needs a “${required}” column`);
+  return lines.map(line=>{const vals=splitCSV(line),row={};headers.forEach((h,i)=>row[h]=vals[i]?.trim()||"");row.amount=Number(row.amount.replace(/[$,]/g,""));if(!row.date||!row.merchant||!row.category||Number.isNaN(row.amount))throw new Error("One or more CSV rows is invalid");return row});
 }
 function splitCSV(line){const out=[];let value="",quoted=false;for(let i=0;i<line.length;i++){const c=line[i];if(c==='"'&&line[i+1]==='"'){value+='"';i++}else if(c==='"')quoted=!quoted;else if(c===","&&!quoted){out.push(value);value=""}else value+=c}out.push(value);return out}
 
