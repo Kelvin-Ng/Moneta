@@ -1,0 +1,9 @@
+.env
+node_modules/
+.DS_Store
+finance.db
+finance.db-wal
+finance.db-shm
+finance.db-journal
+.agents/
+.codex/

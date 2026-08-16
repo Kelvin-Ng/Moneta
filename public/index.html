@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f5f3ee">
+  <title>Moneta — Personal finance, made clear</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" id="brandLink" href="/overview"><span class="brand-mark">M</span><span>moneta</span></a>
+    <nav>
+      <button class="nav-item active" data-section="overview"><span class="icon">⌂</span>Overview</button>
+      <button class="nav-item" data-section="cashflow"><span class="icon">⇢</span>Cash flow</button>
+      <button class="nav-item" data-section="networth"><span class="icon">◒</span>Net worth</button>
+      <button class="nav-item" data-section="transactions"><span class="icon">↕</span>Transactions</button>
+      <button class="nav-item" data-section="accounts"><span class="icon">◫</span>Accounts</button>
+      <button class="nav-item" data-section="insights"><span class="icon">⌁</span>Insights</button>
+    </nav>
+    <section class="saved-views-nav" aria-labelledby="savedViewsLabel">
+      <p id="savedViewsLabel">Saved views</p>
+      <div id="savedViewsNav"></div>
+    </section>
+    <div class="sidebar-bottom">
+      <button class="nav-item" id="settingsBtn" data-section="settings"><span class="icon">⚙</span>Settings</button>
+      <div class="local-pill"><span></span>Stored locally</div>
+      <div class="profile"><div class="avatar">K</div><div><strong>My finances</strong><small>Personal workspace</small></div></div>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <button class="mobile-menu" aria-label="Toggle menu">☰</button>
+      <div>
+        <p class="eyebrow" id="todayLabel">YOUR MONEY, IN FOCUS</p>
+        <h1 id="pageTitle">Good morning.</h1>
+      </div>
+      <div class="header-actions">
+        <label class="search"><span>⌕</span><input id="searchInput" placeholder="Search anything"></label>
+        <button class="icon-btn" aria-label="Notifications">◌<i></i></button>
+        <button class="primary-btn" id="addBtn"><span>＋</span>Add transaction</button>
+      </div>
+    </header>
+
+    <section class="toolbar">
+      <div class="segmented" id="datePresets">
+        <button data-range="month">This month</button>
+        <button data-range="quarter" class="active">3 months</button>
+        <button data-range="year">This year</button>
+        <button data-range="all">All time</button>
+      </div>
+      <div class="toolbar-right">
+        <button class="quiet-btn" id="dateBtn">◷ <span id="dateLabel">May 1 – Jul 8</span></button>
+        <button class="quiet-btn" id="filterBtn">☷ Filters <span class="filter-count" id="filterCount">0</span></button>
+      </div>
+    </section>
+
+    <section class="view active" id="overviewView">
+      <div class="kpi-grid">
+        <article class="kpi hero-kpi">
+          <div class="kpi-label">Net cash flow <span class="hint">?</span></div>
+          <div class="kpi-value" id="netValue">$0</div>
+          <div class="kpi-foot"><span class="trend up" id="netTrend">↑ 0%</span><span>vs. prior period</span></div>
+          <div class="mini-wave" id="miniWave"></div>
+        </article>
+        <article class="kpi">
+          <div class="kpi-label"><i class="dot income"></i>Income</div>
+          <div class="kpi-value" id="incomeValue">$0</div>
+          <div class="kpi-foot"><span class="trend up">↑ 4.8%</span><span>vs. prior period</span></div>
+        </article>
+        <article class="kpi">
+          <div class="kpi-label"><i class="dot expense"></i>Expenses</div>
+          <div class="kpi-value" id="expenseValue">$0</div>
+          <div class="kpi-foot"><span class="trend down">↓ 7.2%</span><span>vs. prior period</span></div>
+        </article>
+        <article class="kpi">
+          <div class="kpi-label"><i class="dot invested"></i>Invested</div>
+          <div class="kpi-value" id="investedValue">$0</div>
+          <div class="kpi-foot"><span class="muted">Automated & manual</span></div>
+        </article>
+      </div>
+
+      <div class="dashboard-grid">
+        <article class="card flow-card">
+          <div class="card-heading">
+            <div><h2>Money flow</h2><p>Income and spending over time</p></div>
+            <div class="card-heading-actions"><div class="legend"><span><i class="dot income"></i>Income</span><span><i class="dot expense"></i>Expenses</span></div><button class="text-btn" id="cashFlowBtn">Full report →</button></div>
+          </div>
+          <div class="chart-wrap"><svg id="flowChart" role="img" aria-label="Income and expense chart"></svg></div>
+        </article>
+        <article class="card spending-card">
+          <div class="card-heading"><div><h2>Spending</h2><p>By category</p></div><button class="text-btn" id="insightsBtn">View insights →</button></div>
+          <div class="donut-area">
+            <div class="donut" id="donut"><div><strong id="donutTotal">$0</strong><span>total spent</span></div></div>
+            <div class="category-list" id="categoryList"></div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="view" id="cashflowView">
+      <div class="report-view-bar">
+        <div><p class="eyebrow" id="reportContextLabel">LIVE REPORT</p><strong id="reportContextName">Cash flow</strong><small id="reportContextDescription">Calculated from current data using the active report settings.</small></div>
+        <button class="quiet-btn" id="saveViewBtn">＋ Save as view</button>
+      </div>
+      <div class="cashflow-kpis">
+        <article class="kpi"><div class="kpi-label"><i class="dot income"></i>Total income</div><div class="kpi-value" id="cashflowIncome">$0</div><div class="kpi-foot">For the active date range</div></article>
+        <article class="kpi"><div class="kpi-label"><i class="dot expense"></i>Total expenses</div><div class="kpi-value" id="cashflowExpense">$0</div><div class="kpi-foot">Card payments and transfers excluded</div></article>
+        <article class="kpi hero-kpi"><div class="kpi-label">Net cash flow</div><div class="kpi-value" id="cashflowNet">$0</div><div class="kpi-foot" id="cashflowNetLabel">Income minus expenses</div></article>
+        <article class="kpi"><div class="kpi-label">Savings rate</div><div class="kpi-value" id="cashflowRate">0%</div><div class="kpi-foot">Net cash flow ÷ income</div></article>
+      </div>
+
+      <article class="card cashflow-report-card">
+        <div class="card-heading">
+          <div><h2>Income vs. expenses</h2><p>Monthly totals using the filters above</p></div>
+          <div class="legend"><span><i class="dot income"></i>Income</span><span><i class="dot expense"></i>Expenses</span></div>
+        </div>
+        <div class="cashflow-chart-scroll"><svg id="cashflowBarChart" role="img" aria-label="Monthly income and expense bar chart"></svg></div>
+      </article>
+
+      <article class="card cashflow-report-card sankey-card">
+        <div class="card-heading">
+          <div><h2>Category flow</h2><p>Categories → Monarch groups → available cash → groups → categories</p></div>
+          <span class="report-note">Click a node or flow to see transactions</span>
+        </div>
+        <div class="cashflow-chart-scroll sankey-scroll"><svg id="cashflowSankey" role="img" aria-label="Cash flow Sankey diagram by category"></svg></div>
+        <p class="sankey-footnote">Transfers, credit-card payments, and investment trades are excluded. If spending exceeds income, Cash reserves represents the amount funded from existing balances.</p>
+        <section class="sankey-details" id="sankeyDetails" hidden>
+          <div class="sankey-details-heading"><div><p class="eyebrow" id="sankeyDetailsType">SELECTED CATEGORY</p><h2 id="sankeyDetailsTitle">Transactions</h2><p id="sankeyDetailsSummary"></p></div></div>
+          <div class="sankey-table-scroll" id="sankeyDetailsTable"><table><thead><tr><th>Date</th><th>Description</th><th>Group</th><th>Category</th><th>Account</th><th class="right">Amount</th></tr></thead><tbody id="sankeyDetailsRows"></tbody></table></div>
+          <div class="sankey-details-empty" id="sankeyDetailsEmpty" hidden>No matching transactions under the active filters.</div>
+        </section>
+      </article>
+    </section>
+
+    <section class="view" id="networthView">
+      <div class="net-worth-kpis">
+        <article class="kpi hero-kpi"><div class="kpi-label">Latest net worth</div><div class="kpi-value" id="netWorthLatest">$0</div><div class="kpi-foot">Assets minus liabilities</div></article>
+        <article class="kpi"><div class="kpi-label">Change in range</div><div class="kpi-value" id="netWorthChange">$0</div><div class="kpi-foot" id="netWorthChangePercent">0%</div></article>
+        <article class="kpi"><div class="kpi-label">Accounts included</div><div class="kpi-value" id="netWorthAccountCount">0</div><div class="kpi-foot">Use the account filters below</div></article>
+      </div>
+      <article class="card net-worth-card">
+        <div class="card-heading net-worth-heading">
+          <div><h2>Daily net worth</h2><p id="netWorthRangeLabel">Daily closing balance history</p></div>
+          <div class="net-worth-account-filters" id="netWorthAccountFilters" aria-label="Filter net worth by account"></div>
+        </div>
+        <div class="net-worth-chart-wrap"><svg id="netWorthChart" role="img" aria-label="Daily net worth line chart"></svg><div class="net-worth-tooltip" id="netWorthTooltip" role="status" hidden></div></div>
+        <p class="net-worth-note" id="netWorthNote">Investment history is reconstructed from positions, transactions, and daily security closing prices, then cached locally.</p>
+      </article>
+      <article class="card net-worth-accounts-card">
+        <div class="card-heading"><div><h2>Included accounts</h2><p>Latest balance contribution</p></div></div>
+        <div class="net-worth-account-list" id="netWorthAccountList"></div>
+      </article>
+    </section>
+
+    <section class="view" id="accountsView">
+      <div class="section-heading"><div><h2>Connected accounts</h2><p>Your complete financial picture, synced in one place.</p></div><div class="table-actions"><button class="quiet-btn" id="syncAllBtn">↻ Sync all</button><button class="primary-btn" id="connectBtn">＋ Connect account</button></div></div>
+      <div class="accounts-grid" id="accountsGrid"></div>
+      <article class="info-banner"><div class="shield">✓</div><div><strong>Your data stays on this device</strong><p>Moneta stores transaction data in a local SQLite database. Connector credentials are never included in exports.</p></div></article>
+    </section>
+
+    <section class="view" id="settingsView">
+      <div class="settings-grid">
+        <article class="card settings-card">
+          <div class="settings-card-heading"><div><p class="eyebrow">CONNECTIONS</p><h2>Plaid configuration</h2><p>Credentials are stored in the local SQLite database and used immediately.</p></div><span class="settings-status" id="plaidSettingsStatus">Not configured</span></div>
+          <form id="plaidSettingsForm" class="settings-form">
+            <label>Environment<select name="environment" id="plaidEnvironment"><option value="sandbox">Sandbox</option><option value="development">Development</option><option value="production">Production</option></select><small>Use Sandbox for test institutions. Development and Production require access from Plaid.</small></label>
+            <label>Client ID<input name="client_id" id="plaidClientId" autocomplete="off" placeholder="Your Plaid client ID"></label>
+            <label>Plaid secret<input name="secret" id="plaidSecret" type="password" autocomplete="new-password" placeholder="Enter a secret"><small id="plaidSecretHint">No secret saved.</small></label>
+            <label class="full">OAuth redirect URI <span>(optional)</span><input name="redirect_uri" id="plaidRedirectUri" placeholder="https://your-domain.example/"><small id="plaidRedirectHint">Usually left blank for local Sandbox use.</small></label>
+            <label class="settings-checkbox full" id="clearPlaidSecretRow" hidden><input type="checkbox" name="clear_secret" id="clearPlaidSecret">Remove the currently saved secret</label>
+            <div class="settings-form-actions full"><button class="primary-btn" type="submit">Save Plaid settings</button></div>
+          </form>
+        </article>
+        <article class="card settings-card">
+          <div class="settings-card-heading"><div><p class="eyebrow">LOCAL DATA</p><h2>Demo data</h2><p>Create sample accounts and transactions whenever you want to explore Moneta.</p></div></div>
+          <div class="database-stats"><div><strong id="settingsAccountCount">0</strong><span>Accounts</span></div><div><strong id="settingsTransactionCount">0</strong><span>Transactions</span></div></div>
+          <div class="demo-data-action"><div><strong>Generate demo portfolio</strong><p>Adds four local demo accounts and 25 sample transactions. Existing accounts and transactions are not changed, and clicking again does not create duplicates.</p></div><button class="quiet-btn" id="generateDemoBtn" type="button">＋ Generate demo data</button></div>
+        </article>
+        <article class="info-banner settings-info"><div class="shield">⌂</div><div><strong>Local configuration</strong><p>Plaid credentials, access tokens, and financial data are stored in <code>finance.db</code>. Keep the database out of Git and backups you do not trust.</p></div></article>
+      </div>
+    </section>
+
+    <section class="view" id="insightsView">
+      <div class="section-heading"><div><h2>Spending insights</h2><p>Every number follows your active date range and filters.</p></div></div>
+      <div class="insights-grid" id="insightsGrid"></div>
+    </section>
+
+    <section class="transactions-section" id="transactionsSection">
+      <div class="card-heading">
+        <div><h2>Recent activity</h2><p id="resultCount">All accounts</p></div>
+        <div class="table-actions"><button class="quiet-btn" id="importBtn">⇧ Import CSV</button><button class="text-btn" id="seeAllBtn">See all →</button></div>
+      </div>
+      <div class="table-scroll">
+        <table><thead><tr><th><input type="checkbox" aria-label="Select all"></th><th>Date</th><th>Description</th><th>Category</th><th>Account</th><th>Type</th><th class="right">Amount</th><th></th></tr></thead><tbody id="transactionRows"></tbody></table>
+      </div>
+      <div class="empty-state" id="emptyState"><div>⌕</div><h3>No transactions found</h3><p>Try widening your date range or clearing a filter.</p><button class="quiet-btn" id="clearFiltersBtn">Clear filters</button></div>
+    </section>
+  </main>
+
+  <div class="scrim" id="scrim"></div>
+  <aside class="filter-panel" id="filterPanel">
+    <div class="panel-header"><div><h2>Filters</h2><p>Refine every number on the page</p></div><button class="close-btn" data-close>×</button></div>
+    <div class="filter-group"><label>Custom date range</label><div class="date-inputs"><input type="date" id="fromDate"><span>to</span><input type="date" id="toDate"></div></div>
+    <div class="filter-group"><label>Show activity</label><div id="kindChecks" class="check-list"></div></div>
+    <div class="filter-group"><label>Accounts</label><div id="accountChecks" class="check-list"></div></div>
+    <div class="filter-group"><label>Categories</label><div id="categoryChecks" class="check-list compact"></div></div>
+    <div class="panel-actions"><button class="quiet-btn" id="resetFilters">Reset</button><button class="primary-btn" id="applyFilters">Apply filters</button></div>
+  </aside>
+
+  <dialog id="transactionDialog">
+    <form method="dialog" id="transactionForm">
+      <div class="panel-header"><div><h2>Add transaction</h2><p>Record income, spending, transfers, or investments</p></div><button class="close-btn" value="cancel">×</button></div>
+      <div class="type-picker">
+        <label><input type="radio" name="kind" value="expense" checked><span>Expense</span></label>
+        <label><input type="radio" name="kind" value="income"><span>Income</span></label>
+        <label><input type="radio" name="kind" value="investment"><span>Investment</span></label>
+        <label><input type="radio" name="kind" value="transfer"><span>Transfer</span></label>
+      </div>
+      <div class="form-grid">
+        <label class="full">Description<input required name="merchant" placeholder="e.g. Neighborhood market"></label>
+        <label>Amount<input required name="amount" type="number" min="0" step="0.01" placeholder="0.00"></label>
+        <label>Date<input required name="date" type="date"></label>
+        <label>Category<select required name="category" id="categorySelect"></select></label>
+        <label>Account<select required name="account_id" id="accountSelect"></select></label>
+        <label class="full">Note <span>(optional)</span><textarea name="note" placeholder="Add a little context"></textarea></label>
+      </div>
+      <div class="dialog-actions"><button class="quiet-btn" value="cancel">Cancel</button><button class="primary-btn" value="default" id="saveTransaction">Add transaction</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="connectDialog">
+    <form method="dialog">
+      <div class="panel-header"><div><h2 id="connectTitle">Connect an account</h2><p id="connectSubtitle">Choose the kind of account to link securely</p></div><button class="close-btn" value="cancel">×</button></div>
+      <div class="connection-choices" id="connectionChoices">
+        <button value="cancel" data-connect-type="bank"><b>▤</b><span><strong>Bank or credit card</strong><small>Checking, savings, loans, and cards</small></span><i>→</i></button>
+        <button value="cancel" data-connect-type="investment"><b>⌁</b><span><strong>Investment account</strong><small>Brokerages, retirement, and portfolios</small></span><i>→</i></button>
+      </div>
+      <div class="setup-steps" id="plaidSetup" hidden>
+        <span>1</span><p>Create a developer account at <a href="https://dashboard.plaid.com/signup" target="_blank" rel="noreferrer">dashboard.plaid.com</a>.</p>
+        <span>2</span><p>Open <a href="/settings">Settings</a> and save your client ID and secret.</p>
+        <span>3</span><p>Return to Accounts and click “Connect account” again.</p>
+      </div>
+      <p class="connector-note">Sandbox uses test institutions and credentials. Change the Plaid environment in Settings only after Plaid grants Development or Production access.</p>
+    </form>
+  </dialog>
+
+  <dialog id="importDialog">
+    <form method="dialog" id="importForm">
+      <div class="panel-header"><div><h2>Import transactions</h2><p>CSV columns: date, merchant, amount, category, kind</p></div><button class="close-btn" value="cancel">×</button></div>
+      <label class="upload-box"><input type="file" id="csvFile" accept=".csv,text/csv"><span>⇧</span><strong>Choose a CSV file</strong><small>Duplicate rows are safely skipped</small></label>
+      <label class="select-label">Import into<select id="importAccount"></select></label>
+      <div class="dedupe-note"><span>↔</span><div><strong>Transfer matching is automatic</strong><p>Matching bank withdrawals and card payments are paired and excluded from expenses.</p></div></div>
+      <div class="dialog-actions"><button class="quiet-btn" value="cancel">Cancel</button><button class="primary-btn" id="runImport" value="default">Import file</button></div>
+    </form>
+  </dialog>
+  <dialog id="saveViewDialog">
+    <form method="dialog" id="saveViewForm">
+      <div class="panel-header"><div><h2>Save report view</h2><p>Save the current report settings, not calculated values.</p></div><button class="close-btn" value="cancel">×</button></div>
+      <label class="save-view-name">View name<input required maxlength="80" id="viewName" name="name" placeholder="e.g. Monthly household spending"></label>
+      <div class="report-settings-summary" id="reportSettingsSummary"></div>
+      <div class="dialog-actions"><button class="quiet-btn" value="cancel">Cancel</button><button class="primary-btn" value="default">Save view</button></div>
+    </form>
+  </dialog>
+  <div class="toast" id="toast"></div>
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
