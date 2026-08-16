@@ -240,7 +240,7 @@ async function loadSettings(){
 
 function renderSettings(){
   if(!state.settings)return;
-  const {plaid,database}=state.settings;
+  const {plaid,ai,database}=state.settings;
   $("#plaidEnvironment").value=plaid.environment;
   $("#plaidClientId").value=plaid.client_id;
   $("#plaidSecret").value="";
@@ -255,6 +255,39 @@ function renderSettings(){
   $("#plaidRedirectHint").classList.toggle("settings-error",!plaid.redirect.valid);
   $("#settingsAccountCount").textContent=database.accounts;
   $("#settingsTransactionCount").textContent=database.transactions;
+  $("#aiProtocol").value=ai.protocol;
+  $("#aiProtocol").dataset.previous=ai.protocol;
+  $("#aiEndpoint").value=ai.endpoint;
+  $("#aiModel").value=ai.model;
+  $("#aiRules").value=ai.rules;
+  $("#aiApiKey").value="";
+  $("#aiApiKeyHint").textContent=ai.api_key_configured?"An API key is saved. Leave this blank to keep it.":ai.protocol==="openai-compatible"?"Optional for local providers; required by most hosted providers.":"No API key saved.";
+  $("#clearAiApiKeyRow").hidden=!ai.api_key_configured;
+  $("#clearAiApiKey").checked=false;
+  const aiStatus=$("#aiSettingsStatus");
+  const progress=ai.progress||{running:false};
+  aiStatus.textContent=progress.running?`${ai.model} · running`:ai.configured?`${ai.model} · ready`:"Not configured";
+  aiStatus.classList.toggle("configured",ai.configured||progress.running);
+  $("#aiCategorizedCount").textContent=ai.counts.categorized||0;
+  $("#aiPendingCount").textContent=ai.counts.pending||0;
+  $("#aiErrorCount").textContent=ai.counts.error||0;
+  $("#aiProtectedCount").textContent=ai.protected_count||0;
+  $("#categorizePendingBtn").disabled=!ai.configured||progress.running;
+  $("#recategorizeAllBtn").disabled=!ai.configured||progress.running;
+  $("#categorizePendingBtn").textContent=progress.running?"Categorizing…":"Categorize pending";
+  $("#recategorizeAllBtn").textContent=progress.running?"Categorizing…":"Re-categorize all";
+  const lastRun=ai.last_run?new Date(ai.last_run).toLocaleString():"Never run";
+  $("#aiLastRun").textContent=progress.running
+    ? `${progress.message}. Processed ${progress.processed||0} of ${progress.requested||0}; ${progress.categorized||0} categorized, ${progress.failed||0} failed across ${progress.requests||0} request${progress.requests===1?"":"s"}.`
+    :ai.last_error?`Last run: ${lastRun} · ${ai.last_error}`:`Last run: ${lastRun}. Only compact categorization evidence is sent to the configured provider.`;
+  updateAiEndpointHint();
+}
+
+const aiEndpointDefaults={"openai-responses":"https://api.openai.com/v1/responses","openai-compatible":"",anthropic:"https://api.anthropic.com/v1/messages",gemini:"https://generativelanguage.googleapis.com/v1beta"};
+function updateAiEndpointHint(){
+  const protocol=$("#aiProtocol").value;
+  const descriptions={"openai-responses":"OpenAI Responses API endpoint.","openai-compatible":"Exact /chat/completions endpoint for a hosted gateway or local server.",anthropic:"Anthropic Messages API endpoint.",gemini:"Gemini API base URL; Moneta appends the selected model and generateContent path."};
+  $("#aiEndpointHint").textContent=descriptions[protocol];
 }
 
 function renderInsights(){
@@ -840,6 +873,7 @@ function bind(){
   $("#transactionForm").onsubmit=async e=>{
     const trigger=e.submitter;if(trigger?.value==="cancel")return;
     e.preventDefault();const data=Object.fromEntries(new FormData(e.currentTarget));
+    data.disable_ai_categorization=$("#manualDisableAI").checked;
     try{await request("/api/transactions",{method:"POST",body:JSON.stringify(data)});$("#transactionDialog").close();e.currentTarget.reset();toast("Transaction added");await load(true)}catch(err){toast(err.message)}
   };
   $("#transactionRows").onclick=async e=>{
@@ -851,7 +885,7 @@ function bind(){
     const file=$("#csvFile").files[0];if(!file)return toast("Choose a CSV file first");
     try{
       const rows=parseCSV(await file.text());
-      const result=await request("/api/import",{method:"POST",body:JSON.stringify({account_id:Number($("#importAccount").value),rows})});
+      const result=await request("/api/import",{method:"POST",body:JSON.stringify({account_id:Number($("#importAccount").value),rows,disable_ai_categorization:$("#importDisableAI").checked})});
       $("#importDialog").close();toast(`Imported ${result.added}; skipped ${result.skipped}`);await load(true);
     }catch(err){toast(err.message)}
   };
@@ -870,6 +904,37 @@ function bind(){
       renderSettings();toast("Plaid settings saved");
     }catch(error){toast(error.message)}finally{submit.disabled=false}
   };
+  $("#aiProtocol").onchange=()=>{
+    const previousAiProtocol=$("#aiProtocol").dataset.previous||"openai-compatible";
+    const currentEndpoint=$("#aiEndpoint").value.trim();
+    if(!currentEndpoint||currentEndpoint===aiEndpointDefaults[previousAiProtocol])$("#aiEndpoint").value=aiEndpointDefaults[$("#aiProtocol").value];
+    $("#aiProtocol").dataset.previous=$("#aiProtocol").value;updateAiEndpointHint();
+  };
+  $("#aiApiKey").oninput=()=>{if($("#aiApiKey").value)$("#clearAiApiKey").checked=false};
+  $("#aiSettingsForm").onsubmit=async event=>{
+    event.preventDefault();const submit=event.submitter;submit.disabled=true;
+    try{
+      state.settings=await request("/api/settings/ai",{method:"PUT",body:JSON.stringify({
+        protocol:$("#aiProtocol").value,endpoint:$("#aiEndpoint").value,model:$("#aiModel").value,
+        api_key:$("#aiApiKey").value,clear_api_key:$("#clearAiApiKey").checked,rules:$("#aiRules").value
+      })});
+      renderSettings();toast("AI settings saved");
+    }catch(error){toast(error.message)}finally{submit.disabled=false}
+  };
+  const runCategorization=async all=>{
+    const count=all?(state.settings.ai.counts.categorized||0)+(state.settings.ai.counts.pending||0)+(state.settings.ai.counts.error||0):(state.settings.ai.counts.pending||0)+(state.settings.ai.counts.error||0);
+    if(!count)return toast("There are no transactions to categorize");
+    if(!confirm(`${all?"Re-categorize all":"Categorize pending"} ${count} transaction${count===1?"":"s"}?\n\nCompact categorization evidence will be sent to ${state.settings.ai.model}. Full source records stay local. This may incur provider charges.`))return;
+    state.settings.ai.progress={running:true,requested:count,processed:0,categorized:0,failed:0,requests:0,message:"Starting categorization"};renderSettings();
+    const poll=setInterval(async()=>{try{state.settings=await request("/api/settings");renderSettings()}catch{}},750);
+    try{
+      const result=await request("/api/categorization/run",{method:"POST",body:JSON.stringify({all})});
+      state.settings=result.settings;renderSettings();await load(true);
+      toast(`${result.stopped?"Stopped early. ":""}Categorized ${result.categorized}; ${result.failed} failed in ${result.requests} request${result.requests===1?"":"s"}`);
+    }catch(error){toast(error.message)}finally{clearInterval(poll);try{await loadSettings()}catch{}}
+  };
+  $("#categorizePendingBtn").onclick=()=>runCategorization(false);
+  $("#recategorizeAllBtn").onclick=()=>runCategorization(true);
   $("#generateDemoBtn").onclick=async event=>{
     if(!confirm("Generate four demo accounts and 25 sample transactions?\n\nYour existing data will not be changed."))return;
     const button=event.currentTarget;button.disabled=true;button.textContent="Generating…";
@@ -884,8 +949,9 @@ function bind(){
 
 function parseCSV(text){
   const lines=text.trim().split(/\r?\n/).filter(Boolean), headers=splitCSV(lines.shift()).map(x=>x.trim().toLowerCase());
-  for(const required of ["date","merchant","amount","category"])if(!headers.includes(required))throw new Error(`CSV needs a “${required}” column`);
-  return lines.map(line=>{const vals=splitCSV(line),row={};headers.forEach((h,i)=>row[h]=vals[i]?.trim()||"");row.amount=Number(row.amount.replace(/[$,]/g,""));if(!row.date||!row.merchant||!row.category||Number.isNaN(row.amount))throw new Error("One or more CSV rows is invalid");return row});
+  for(const required of ["date","amount"])if(!headers.includes(required))throw new Error(`CSV needs a “${required}” column`);
+  if(!headers.includes("description")&&!headers.includes("merchant"))throw new Error("CSV needs a “description” or “merchant” column");
+  return lines.map(line=>{const vals=splitCSV(line),row={};headers.forEach((h,i)=>row[h]=vals[i]?.trim()||"");row.amount=Number(row.amount.replace(/[$,]/g,""));if(!row.date||!(row.description||row.merchant)||Number.isNaN(row.amount))throw new Error("One or more CSV rows is invalid");return row});
 }
 function splitCSV(line){const out=[];let value="",quoted=false;for(let i=0;i<line.length;i++){const c=line[i];if(c==='"'&&line[i+1]==='"'){value+='"';i++}else if(c==='"')quoted=!quoted;else if(c===","&&!quoted){out.push(value);value=""}else value+=c}out.push(value);return out}
 

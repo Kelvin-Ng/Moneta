@@ -182,6 +182,20 @@
           </form>
         </article>
         <article class="card settings-card">
+          <div class="settings-card-heading"><div><p class="eyebrow">CATEGORIZATION</p><h2>AI provider</h2><p>New transactions are categorized in batches using the provider and model you choose.</p></div><span class="settings-status" id="aiSettingsStatus">Not configured</span></div>
+          <form id="aiSettingsForm" class="settings-form">
+            <label>Provider protocol<select name="protocol" id="aiProtocol"><option value="openai-responses">OpenAI Responses</option><option value="openai-compatible">OpenAI-compatible chat</option><option value="anthropic">Anthropic Messages</option><option value="gemini">Google Gemini</option></select><small>The adapter controls request and response formatting; category logic remains provider-neutral.</small></label>
+            <label>Model<input name="model" id="aiModel" autocomplete="off" placeholder="Provider model ID"><small>Use a model available to your provider account.</small></label>
+            <label class="full">API endpoint<input name="endpoint" id="aiEndpoint" type="url" autocomplete="off" placeholder="https://provider.example/v1/..."><small id="aiEndpointHint">Enter the provider API endpoint.</small></label>
+            <label>API key <span>(optional for local compatible servers)</span><input name="api_key" id="aiApiKey" type="password" autocomplete="new-password" placeholder="Enter an API key"><small id="aiApiKeyHint">No API key saved.</small></label>
+            <label class="settings-checkbox" id="clearAiApiKeyRow" hidden><input type="checkbox" name="clear_api_key" id="clearAiApiKey">Remove the currently saved API key</label>
+            <label class="full">Your categorization rules <span>(optional)</span><textarea name="rules" id="aiRules" rows="8" placeholder="Examples:&#10;Transactions from Acme Payroll are Paychecks.&#10;Peer-to-peer payment memos mentioning lunch or dinner are Restaurants & Bars."></textarea><small>Write rules in natural language. They are sent with every categorization batch and take priority when relevant.</small></label>
+            <div class="settings-form-actions full"><button class="primary-btn" type="submit">Save AI settings</button></div>
+          </form>
+          <div class="categorization-status-grid"><div><strong id="aiCategorizedCount">0</strong><span>Categorized</span></div><div><strong id="aiPendingCount">0</strong><span>Pending</span></div><div><strong id="aiErrorCount">0</strong><span>Errors</span></div><div><strong id="aiProtectedCount">0</strong><span>AI protected</span></div></div>
+          <div class="demo-data-action"><div><strong>Run categorization</strong><p id="aiLastRun">Only compact categorization evidence will be sent to the configured provider. Re-categorizing all records may use significant API tokens.</p></div><div class="settings-action-buttons"><button class="quiet-btn" id="categorizePendingBtn" type="button">Categorize pending</button><button class="quiet-btn" id="recategorizeAllBtn" type="button">Re-categorize all</button></div></div>
+        </article>
+        <article class="card settings-card">
           <div class="settings-card-heading"><div><p class="eyebrow">LOCAL DATA</p><h2>Demo data</h2><p>Create sample accounts and transactions whenever you want to explore Moneta.</p></div></div>
           <div class="database-stats"><div><strong id="settingsAccountCount">0</strong><span>Accounts</span></div><div><strong id="settingsTransactionCount">0</strong><span>Transactions</span></div></div>
           <div class="demo-data-action"><div><strong>Generate demo portfolio</strong><p>Adds four local demo accounts and 25 sample transactions. Existing accounts and transactions are not changed, and clicking again does not create duplicates.</p></div><button class="quiet-btn" id="generateDemoBtn" type="button">＋ Generate demo data</button></div>
@@ -226,6 +240,7 @@
         <label>Category<select required name="category" id="categorySelect"></select></label>
         <label>Account<select required name="account_id" id="accountSelect"></select></label>
         <label class="full">Note <span>(optional)</span><textarea name="note" placeholder="Add a little context"></textarea></label>
+        <label class="full ai-protection-option"><input type="checkbox" id="manualDisableAI" name="disable_ai_categorization"><span><strong>Protect this category from AI</strong><small>AI categorization and “Re-categorize all” will always skip this transaction.</small></span></label>
       </div>
       <div class="dialog-actions"><button class="quiet-btn" value="cancel">Cancel</button><button class="primary-btn" value="default" id="saveTransaction">Add transaction</button></div>
     </form>
@@ -249,9 +264,10 @@
 
   <dialog id="importDialog">
     <form method="dialog" id="importForm">
-      <div class="panel-header"><div><h2>Import transactions</h2><p>CSV columns: date, merchant, amount, category</p></div><button class="close-btn" value="cancel">×</button></div>
+      <div class="panel-header"><div><h2>Import transactions</h2><p>Required CSV columns: date, amount, and description or merchant</p></div><button class="close-btn" value="cancel">×</button></div>
       <label class="upload-box"><input type="file" id="csvFile" accept=".csv,text/csv"><span>⇧</span><strong>Choose a CSV file</strong><small>Duplicate rows are safely skipped</small></label>
       <label class="select-label">Import into<select id="importAccount"></select></label>
+      <label class="ai-protection-option"><input type="checkbox" id="importDisableAI"><span><strong>Protect imported categories from AI</strong><small>Every imported row will be skipped by automatic categorization and “Re-categorize all.”</small></span></label>
       <div class="dedupe-note"><span>↔</span><div><strong>Transfer matching is automatic</strong><p>Matching bank withdrawals and card payments are paired and excluded from expenses.</p></div></div>
       <div class="dialog-actions"><button class="quiet-btn" value="cancel">Cancel</button><button class="primary-btn" id="runImport" value="default">Import file</button></div>
     </form>

@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { decode as decodeToon } from "@toon-format/toon";
 
 const port=4199;
 const plaidPort=4200;
@@ -13,11 +14,55 @@ const temp=mkdtempSync(join(tmpdir(),"moneta-test-"));
 let server, plaidServer;
 let plaidSyncDelay=0;
 let plaidTransactionStatuses=[];
+let aiRequests=[];
+let aiResponseMode="";
+let aiResponseDelay=0;
 test.before(async()=>{
   plaidServer=createServer(async(req,res)=>{
     let raw="";for await(const chunk of req)raw+=chunk;
     const payload=raw?JSON.parse(raw):{};
     if(req.url==="/transactions/sync"&&plaidSyncDelay)await new Promise(resolve=>setTimeout(resolve,plaidSyncDelay));
+    if(req.url==="/v1/chat/completions"||req.url==="/v1/responses"||req.url==="/v1/messages"||req.url.startsWith("/v1beta/models/")){
+      aiRequests.push({url:req.url,payload,headers:req.headers});
+      if(req.url==="/v1/messages"&&payload.output_config?.format?.type!=="json_schema"){
+        res.writeHead(400,{"content-type":"application/json"});
+        return res.end(JSON.stringify({error:{message:"Anthropic structured output is required"}}));
+      }
+      if(req.url==="/v1/messages"&&payload.output_config.format.schema.properties.transactions?.minItems>1){
+        res.writeHead(400,{"content-type":"application/json"});
+        return res.end(JSON.stringify({error:{message:"Anthropic only supports minItems values of 0 or 1"}}));
+      }
+      const inputText=req.url==="/v1/responses"?payload.input
+        :req.url.startsWith("/v1beta/models/")?payload.contents.at(-1).parts.at(-1).text
+        :payload.messages.at(-1).content;
+      const input=decodeToon(inputText);
+      if(aiResponseDelay)await new Promise(resolve=>setTimeout(resolve,aiResponseDelay));
+      if(aiResponseMode==="server-error"){
+        res.writeHead(500,{"content-type":"application/json"});
+        return res.end(JSON.stringify({error:{message:"Simulated provider outage"}}));
+      }
+      if(aiResponseMode==="schema-complex-over-two"&&req.url==="/v1/messages"&&input.transactions.length>2){
+        res.writeHead(400,{"content-type":"application/json"});
+        return res.end(JSON.stringify({error:{message:"Schema is too complex for compilation"}}));
+      }
+      if(aiResponseMode==="truncate-over-two"&&req.url==="/v1/messages"&&input.transactions.length>2){
+        res.writeHead(200,{"content-type":"application/json"});
+        return res.end(JSON.stringify({stop_reason:"max_tokens",content:[{type:"text",text:'{"transactions":[]}'}]}));
+      }
+      let transactions=input.transactions.map(transaction=>({
+        id:transaction.id,
+        category:/salary|paycheck/i.test(`${transaction.description} ${transaction.merchant||""}`)?"Paychecks":/dinner|lunch/i.test(`${transaction.description} ${transaction.memo||""}`)?"Restaurants & Bars":"Miscellaneous"
+      }));
+      if(aiResponseMode==="omit-over-two"&&transactions.length>2)transactions=transactions.slice(0,-1);
+      res.writeHead(200,{"content-type":"application/json"});
+      const text=req.url==="/v1/messages"
+        ? JSON.stringify(Object.fromEntries(transactions.map(transaction=>[String(transaction.id),transaction.category])))
+        : JSON.stringify({transactions});
+      if(req.url==="/v1/responses")return res.end(JSON.stringify({output_text:text}));
+      if(req.url==="/v1/messages")return res.end(JSON.stringify({stop_reason:"end_turn",content:[{type:"text",text}]}));
+      if(req.url.startsWith("/v1beta/models/"))return res.end(JSON.stringify({candidates:[{content:{parts:[{text}]}}]}));
+      return res.end(JSON.stringify({choices:[{message:{content:text}}]}));
+    }
     if(req.url.startsWith("/v8/finance/chart/")){
       const today=new Date(),yesterday=new Date(today);yesterday.setUTCDate(today.getUTCDate()-1);
       res.writeHead(200,{"content-type":"application/json"});
@@ -114,6 +159,7 @@ test("a fresh database is empty until demo data is explicitly generated",async()
   assert.equal(data.summary.categories.find(category=>category.name==="Groceries")?.group,"Food & Dining");
   const database=new DatabaseSync(join(temp,"test.db"));
   assert.equal(database.prepare("PRAGMA table_info(transactions)").all().some(column=>column.name==="kind"),false);
+  assert.equal(database.prepare("PRAGMA table_info(transactions)").all().some(column=>column.name==="ai_categorization_disabled"),true);
   database.close();
 });
 
@@ -150,6 +196,61 @@ test("category groups classify transactions and positive expenses reduce totals"
   assert.equal(data.summary.categories.find(category=>category.name==="Groceries").value,80);
   assert.deepEqual(new Set(data.transactions.map(transaction=>transaction.category_group)),new Set(["Income","Food & Dining","Transfers"]));
   assert.ok(data.transactions.every(transaction=>!Object.hasOwn(transaction,"kind")));
+  const protectedResponse=await fetch(`http://localhost:${port}/api/transactions`,{
+    method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({account_id:accountId,date:"2026-08-02",merchant:"Chosen category",amount:-10,category:"Personal",disable_ai_categorization:true})
+  });
+  const protectedId=(await protectedResponse.json()).id;
+  const protectedRun=await fetch(`http://localhost:${port}/api/categorization/run`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:[protectedId]})
+  });
+  const protectedResult=await protectedRun.json();
+  assert.equal(protectedResult.requested,0);
+  const protectedTransaction=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions.find(transaction=>transaction.id===protectedId);
+  assert.equal(protectedTransaction.category,"Personal");
+  assert.equal(protectedTransaction.ai_categorization_disabled,1);
+  assert.equal((await (await fetch(`http://localhost:${port}/api/settings`)).json()).ai.protected_count,1);
+  await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
+});
+
+test("CSV import works without a category and keeps explicit Moneta categories",async()=>{
+  const accountResponse=await fetch(`http://localhost:${port}/api/accounts`,{
+    method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({institution:"CSV Test",name:"Evidence Import",type:"checking",balance:0})
+  });
+  const accountId=(await accountResponse.json()).id;
+  const imported=await fetch(`http://localhost:${port}/api/import`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({account_id:accountId,rows:[
+      {date:"2026-08-10",amount:-6.5,description:"Coffee shop purchase",external_id:"csv-categoryless"},
+      {date:"2026-08-11",amount:-25,description:"A merchant with no useful name",moneta_category:"Groceries",external_id:"csv-explicit"}
+    ]})
+  });
+  assert.equal(imported.status,200);
+  const result=await imported.json();
+  assert.equal(result.added,2);
+  assert.equal(result.categorization.configured,false);
+  assert.equal(result.categorization.requested,1);
+  const transactions=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions;
+  const inferred=transactions.find(transaction=>transaction.external_id==="csv-categoryless");
+  assert.equal(inferred.category,"Coffee Shops");
+  assert.equal(inferred.category_source,"fallback");
+  assert.equal(inferred.categorization_status,"pending");
+  const explicit=transactions.find(transaction=>transaction.external_id==="csv-explicit");
+  assert.equal(explicit.category,"Groceries");
+  assert.equal(explicit.category_source,"manual");
+  assert.equal(explicit.categorization_status,"categorized");
+  const protectedImport=await fetch(`http://localhost:${port}/api/import`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({account_id:accountId,disable_ai_categorization:true,rows:[
+      {date:"2026-08-12",amount:-15,description:"Protected coffee shop",external_id:"csv-protected"}
+    ]})
+  });
+  const protectedImportResult=await protectedImport.json();
+  assert.equal(protectedImportResult.added,1);
+  assert.equal(protectedImportResult.categorization.requested,0);
+  const protectedCsv=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions.find(transaction=>transaction.external_id==="csv-protected");
+  assert.equal(protectedCsv.category,"Coffee Shops");
+  assert.equal(protectedCsv.categorization_status,"categorized");
+  assert.equal(protectedCsv.ai_categorization_disabled,1);
   await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
 });
 
@@ -159,12 +260,16 @@ test("static app is served",async()=>{
   const html=await res.text();
   assert.match(html,/Personal finance, made clear/);
   assert.match(html,/Cash flow/);
+  assert.match(html,/Protect this category from AI/);
+  assert.match(html,/Protect imported categories from AI/);
   assert.match(html,/cashflowSankey/);
   assert.match(html,/cashflowBarTooltip/);
   assert.match(html,/cashflowMonthDetailsRows/);
   assert.match(html,/sankeyDetailsRows/);
   assert.match(html,/categorySelect/);
   assert.match(html,/plaidSettingsForm/);
+  assert.match(html,/aiSettingsForm/);
+  assert.match(html,/recategorizeAllBtn/);
   assert.match(html,/generateDemoBtn/);
 });
 
@@ -313,6 +418,25 @@ test("Plaid Link token, exchange, account persistence, and transaction sync work
   assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-out").category_group,"Food & Dining");
   assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-in").category_group,"Income");
 
+  const database=new DatabaseSync(join(temp,"test.db"));
+  database.prepare(`UPDATE transactions SET category='Personal',category_source='ai',categorization_status='categorized',
+    original_details_json=? WHERE external_id='plaid:tx-out'`).run(JSON.stringify({source:"legacy-plaid",merchant:"Corner Market"}));
+  database.close();
+  const replay=await fetch(`http://localhost:${port}/api/plaid/reimport-legacy`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({item_id:result.item_id})
+  });
+  assert.equal(replay.status,200);
+  const replayResult=(await replay.json()).results[0];
+  assert.equal(replayResult.raw_responses_stored,1);
+  assert.equal(replayResult.legacy_remaining,0);
+  const replayedDatabase=new DatabaseSync(join(temp,"test.db"));
+  const replayed=replayedDatabase.prepare("SELECT category,category_source,categorization_status,original_details_json FROM transactions WHERE external_id='plaid:tx-out'").get();
+  replayedDatabase.close();
+  assert.equal(replayed.category,"Personal");
+  assert.equal(replayed.category_source,"ai");
+  assert.equal(replayed.categorization_status,"categorized");
+  assert.equal(JSON.parse(replayed.original_details_json).source,"plaid");
+
   plaidSyncDelay=120;
   const sync=await fetch(`http://localhost:${port}/api/plaid/sync`,{
     method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({item_id:result.item_id,background:true})
@@ -341,4 +465,233 @@ test("Plaid Link token, exchange, account persistence, and transaction sync work
   assert.equal(afterDelete.accounts.some(account=>account.external_account_id==="credit-test"),true);
   assert.equal(afterDelete.transactions.some(tx=>tx.external_id==="plaid:tx-out"),false);
   assert.equal(afterDelete.transactions.some(tx=>tx.external_id==="plaid:tx-in"),false);
+});
+
+test("AI categorization stores original details and batches transactions through a configurable provider",async()=>{
+  const accountResponse=await fetch(`http://localhost:${port}/api/accounts`,{
+    method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({institution:"AI Test",name:"Batch Account",type:"cash",balance:0})
+  });
+  const accountId=(await accountResponse.json()).id,ids=[];
+  for(const transaction of [
+    {merchant:"Monthly salary from Acme Payroll",amount:5000,category:"Transfer",note:"Direct deposit"},
+    {merchant:"Venmo dinner with friends",amount:-48,category:"Transfer",note:"Dinner split"}
+  ]){
+    const response=await fetch(`http://localhost:${port}/api/transactions`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({account_id:accountId,date:"2026-08-15",...transaction})
+    });
+    assert.equal(response.status,201);ids.push((await response.json()).id);
+  }
+
+  const rules="Acme Payroll deposits are Paychecks. Peer-to-peer dinner memos are Restaurants & Bars.";
+  const settingsResponse=await fetch(`http://localhost:${port}/api/settings/ai`,{
+    method:"PUT",headers:{"content-type":"application/json"},
+    body:JSON.stringify({protocol:"openai-compatible",endpoint:`http://127.0.0.1:${plaidPort}/v1/chat/completions`,model:"mock-category-model",api_key:"test-ai-key",rules})
+  });
+  assert.equal(settingsResponse.status,200);
+  const settings=(await settingsResponse.json()).ai;
+  assert.equal(settings.configured,true);
+  assert.equal(settings.api_key_configured,true);
+  assert.equal("api_key" in settings,false);
+  assert.equal(settings.rules,rules);
+
+  aiRequests=[];
+  const categorize=await fetch(`http://localhost:${port}/api/categorization/run`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:ids})
+  });
+  assert.equal(categorize.status,200);
+  const result=await categorize.json();
+  assert.equal(result.requested,2);assert.equal(result.categorized,2);assert.equal(result.failed,0);assert.equal(result.requests,1);
+  assert.equal(aiRequests.length,1);
+  assert.equal(aiRequests[0].payload.model,"mock-category-model");
+  assert.match(aiRequests[0].payload.messages[0].content,/User rules \(authoritative when relevant\)/);
+  assert.match(aiRequests[0].payload.messages[0].content,/Peer-to-peer dinner memos/);
+  const sent=decodeToon(aiRequests[0].payload.messages.at(-1).content).transactions;
+  assert.equal(sent.length,2);
+  assert.equal(sent[0].description,"Monthly salary from Acme Payroll");
+  assert.equal(sent[0].account_type,"cash");
+  assert.equal(sent[0].memo,"Direct deposit");
+  assert.equal("date" in sent[0],false);
+  assert.equal("original_details" in sent[0],false);
+  assert.equal("institution" in sent[0],false);
+
+  const transactions=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions;
+  assert.equal(transactions.find(transaction=>transaction.id===ids[0]).category,"Paychecks");
+  assert.equal(transactions.find(transaction=>transaction.id===ids[1]).category,"Restaurants & Bars");
+  assert.ok(transactions.every(transaction=>transaction.category_source==="ai"&&transaction.categorization_status==="categorized"&&transaction.has_original_details));
+  assert.ok(transactions.every(transaction=>!("original_details_json" in transaction)));
+
+  aiRequests=[];
+  const csvImport=await fetch(`http://localhost:${port}/api/import`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({account_id:accountId,rows:[{
+      date:"2026-08-14",amount:-32,description:"P2P PAYMENT",memo:"Lunch with coworkers",
+      source_category:"TRANSFER_OUT",source_category_detail:"TRANSFER_OUT_ACCOUNT_TRANSFER",
+      transaction_code:"DDA_TRANSACTION",payment_channel:"online",external_id:"csv-ai-evidence"
+    }]})
+  });
+  assert.equal(csvImport.status,200);
+  const csvResult=await csvImport.json();
+  assert.equal(csvResult.added,1);
+  assert.equal(csvResult.categorization.categorized,1);
+  assert.equal(aiRequests.length,1);
+  const csvEvidence=decodeToon(aiRequests[0].payload.messages.at(-1).content).transactions[0];
+  assert.equal(csvEvidence.description,"P2P PAYMENT");
+  assert.equal(csvEvidence.memo,"Lunch with coworkers");
+  assert.equal(csvEvidence.source_category,"TRANSFER_OUT");
+  assert.equal(csvEvidence.source_category_detail,"TRANSFER_OUT_ACCOUNT_TRANSFER");
+  assert.equal(csvEvidence.transaction_code,"DDA_TRANSACTION");
+  assert.equal(csvEvidence.account_type,"cash");
+  assert.equal("date" in csvEvidence,false);
+  assert.equal("payment_channel" in csvEvidence,false);
+  assert.equal("external_id" in csvEvidence,false);
+  assert.equal("account_name" in csvEvidence,false);
+  assert.equal("category" in csvEvidence,false);
+
+  aiRequests=[];
+  const explicitImport=await fetch(`http://localhost:${port}/api/import`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({account_id:accountId,rows:[{
+      date:"2026-08-13",amount:-21,description:"Neighborhood market",category:"Groceries",external_id:"csv-explicit-category"
+    }]})
+  });
+  const explicitResult=await explicitImport.json();
+  assert.equal(explicitResult.added,1);
+  assert.equal(explicitResult.categorization.requested,0);
+  assert.equal(aiRequests.length,0);
+  const imported=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions;
+  const explicitTransaction=imported.find(transaction=>transaction.external_id==="csv-explicit-category");
+  assert.equal(explicitTransaction.category,"Groceries");
+  assert.equal(explicitTransaction.category_source,"manual");
+  assert.equal(imported.find(transaction=>transaction.external_id==="csv-ai-evidence").category,"Restaurants & Bars");
+
+  for(const adapter of [
+    {protocol:"openai-responses",endpoint:`http://127.0.0.1:${plaidPort}/v1/responses`,model:"mock-openai",path:"/v1/responses",header:"authorization",headerValue:"Bearer provider-test-key"},
+    {protocol:"anthropic",endpoint:`http://127.0.0.1:${plaidPort}/v1/messages`,model:"mock-anthropic",path:"/v1/messages",header:"x-api-key",headerValue:"provider-test-key"},
+    {protocol:"gemini",endpoint:`http://127.0.0.1:${plaidPort}/v1beta`,model:"mock-gemini",path:"/v1beta/models/mock-gemini:generateContent",header:"x-goog-api-key",headerValue:"provider-test-key"}
+  ]){
+    const response=await fetch(`http://localhost:${port}/api/settings/ai`,{
+      method:"PUT",headers:{"content-type":"application/json"},
+      body:JSON.stringify({...adapter,api_key:"provider-test-key",rules})
+    });
+    assert.equal(response.status,200);
+    aiRequests=[];
+    const run=await fetch(`http://localhost:${port}/api/categorization/run`,{
+      method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:ids})
+    });
+    assert.equal(run.status,200);
+    const adapterResult=await run.json();
+    assert.equal(adapterResult.configured,true);
+    assert.equal(adapterResult.requested,2);
+    assert.equal(adapterResult.categorized,2);
+    assert.equal(adapterResult.failed,0);
+    assert.equal(adapterResult.requests,1);
+    assert.deepEqual(adapterResult.errors,[]);
+    assert.equal(aiRequests.length,1);
+    assert.equal(aiRequests[0].url,adapter.path);
+    assert.equal(aiRequests[0].headers[adapter.header],adapter.headerValue);
+    assert.equal(aiRequests[0].payload.model,adapter.protocol==="gemini"?undefined:adapter.model);
+    if(adapter.protocol==="openai-responses")assert.equal(aiRequests[0].payload.text.format.type,"json_schema");
+    if(adapter.protocol==="anthropic"){
+      assert.equal(aiRequests[0].headers["anthropic-version"],"2023-06-01");
+      assert.equal(aiRequests[0].payload.thinking.type,"disabled");
+      assert.equal(aiRequests[0].payload.output_config.format.type,"json_schema");
+      assert.deepEqual(new Set(aiRequests[0].payload.output_config.format.schema.required),new Set(ids.map(String)));
+      assert.equal(aiRequests[0].payload.output_config.format.schema.additionalProperties,false);
+      assert.deepEqual(new Set(Object.keys(aiRequests[0].payload.output_config.format.schema.properties)),new Set(ids.map(String)));
+      assert.deepEqual(aiRequests[0].payload.output_config.format.schema.properties[String(ids[0])],{type:"string"});
+      assert.equal("$defs" in aiRequests[0].payload.output_config.format.schema,false);
+    }
+    if(adapter.protocol==="gemini")assert.equal(aiRequests[0].payload.generationConfig.responseMimeType,"application/json");
+  }
+
+  await fetch(`http://localhost:${port}/api/settings/ai`,{
+    method:"PUT",headers:{"content-type":"application/json"},
+    body:JSON.stringify({protocol:"anthropic",endpoint:`http://127.0.0.1:${plaidPort}/v1/messages`,model:"mock-anthropic",api_key:"provider-test-key",rules})
+  });
+  const retryIds=imported.map(transaction=>transaction.id);
+  aiRequests=[];aiResponseMode="truncate-over-two";aiResponseDelay=100;
+  const retryPromise=fetch(`http://localhost:${port}/api/categorization/run`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:retryIds})
+  });
+  let runningProgress;
+  for(let attempt=0;attempt<20&&!runningProgress?.running;attempt++){
+    await new Promise(resolve=>setTimeout(resolve,10));
+    runningProgress=(await (await fetch(`http://localhost:${port}/api/settings`)).json()).ai.progress;
+  }
+  assert.equal(runningProgress.running,true);
+  assert.equal(runningProgress.requested,4);
+  const retryResult=await (await retryPromise).json();
+  assert.equal(retryResult.stopped,false);
+  assert.equal(retryResult.categorized,4);
+  assert.equal(retryResult.failed,0);
+  assert.equal(retryResult.requests,3);
+  assert.deepEqual(aiRequests.map(request=>decodeToon(request.payload.messages.at(-1).content).transactions.length),[4,2,2]);
+  aiResponseMode="";aiResponseDelay=0;
+
+  aiRequests=[];aiResponseMode="schema-complex-over-two";
+  const schemaRetryRun=await fetch(`http://localhost:${port}/api/categorization/run`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:retryIds})
+  });
+  const schemaRetryResult=await schemaRetryRun.json();
+  assert.equal(schemaRetryResult.stopped,false);
+  assert.equal(schemaRetryResult.categorized,4);
+  assert.equal(schemaRetryResult.failed,0);
+  assert.equal(schemaRetryResult.requests,3);
+  assert.deepEqual(aiRequests.map(request=>decodeToon(request.payload.messages.at(-1).content).transactions.length),[4,2,2]);
+  aiResponseMode="";
+
+  aiRequests=[];aiResponseMode="omit-over-two";
+  const incompleteRun=await fetch(`http://localhost:${port}/api/categorization/run`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:retryIds})
+  });
+  const incompleteResult=await incompleteRun.json();
+  assert.equal(incompleteResult.stopped,false);
+  assert.equal(incompleteResult.categorized,4);
+  assert.equal(incompleteResult.failed,0);
+  assert.equal(incompleteResult.requests,2);
+  assert.deepEqual(aiRequests.map(request=>decodeToon(request.payload.messages.at(-1).content).transactions.length),[4,1]);
+  assert.deepEqual(aiRequests[1].payload.output_config.format.schema.required,[aiRequests[0].payload.output_config.format.schema.required.at(-1)]);
+  aiResponseMode="";
+
+  const outageAccountResponse=await fetch(`http://localhost:${port}/api/accounts`,{
+    method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({institution:"Outage Test",name:"Stop Early",type:"cash",balance:0})
+  });
+  const outageAccountId=(await outageAccountResponse.json()).id;
+  const outageRows=Array.from({length:55},(_,index)=>({
+    date:"2026-08-12",amount:-(index+1),description:`Outage transaction ${index+1}`,
+    category:"Miscellaneous",external_id:`outage-${index+1}`
+  }));
+  await fetch(`http://localhost:${port}/api/import`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({account_id:outageAccountId,rows:outageRows})
+  });
+  const outageIds=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${outageAccountId}`)).json()).transactions.map(transaction=>transaction.id);
+  aiRequests=[];aiResponseMode="server-error";
+  const outageRun=await fetch(`http://localhost:${port}/api/categorization/run`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:outageIds})
+  });
+  const outageResult=await outageRun.json();
+  assert.equal(outageResult.stopped,true);
+  assert.equal(outageResult.requests,1);
+  assert.equal(outageResult.failed,50);
+  assert.equal(aiRequests.length,1);
+  const outageTransactions=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${outageAccountId}`)).json()).transactions;
+  assert.equal(outageTransactions.filter(transaction=>transaction.categorization_status==="error").length,50);
+  assert.equal(outageTransactions.filter(transaction=>transaction.categorization_status==="categorized").length,5);
+  aiResponseMode="";
+  await fetch(`http://localhost:${port}/api/accounts/${outageAccountId}`,{method:"DELETE"});
+
+  aiRequests=[];
+  const recategorizeAll=await fetch(`http://localhost:${port}/api/categorization/run`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({all:true})
+  });
+  assert.equal(recategorizeAll.status,200);
+  assert.ok((await recategorizeAll.json()).categorized>=2);
+  const afterAll=(await (await fetch(`http://localhost:${port}/api/bootstrap`)).json()).transactions;
+  for(const externalId of ["demo:tx:5","demo:tx:6"]){
+    const transfer=afterAll.find(transaction=>transaction.external_id===externalId);
+    assert.equal(transfer.category,"Credit Card Payment");
+    assert.equal(transfer.category_source,"transfer-match");
+  }
+  await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
 });

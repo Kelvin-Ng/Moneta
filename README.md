@@ -10,6 +10,7 @@ database and can import financial data through Plaid or CSV.
 - Plaid connections for supported banks, cards, and brokerages
 - Credit-card payment matching so transfers are not counted as duplicate expenses
 - Monarch-style category groups and categories
+- Batched AI categorization with provider-neutral rules and re-categorization
 - Filterable cash-flow totals, monthly bar chart, and interactive Sankey report
 - Daily net-worth history with account filters
 - Investment-history reconstruction using transactions, holdings, and closing prices
@@ -23,12 +24,15 @@ Every main page has a direct URL, including `/overview`, `/cash-flow`,
 
 - Node.js 22.5 or newer; Node.js 24 is recommended
 - A Plaid developer account only if you want automatic account connections
+- An AI provider or compatible local model server only if you want AI categorization
 
-The project currently has no third-party npm runtime dependencies.
+The only third-party runtime dependency is the official TOON encoder used to
+compact transaction evidence sent to an AI provider.
 
 ## Quick start
 
 ```bash
+npm install
 npm start
 ```
 
@@ -82,12 +86,76 @@ institutions in Development or Production require an exact HTTPS redirect URI:
 The URI cannot contain a query string or fragment. HTTP localhost redirect URIs
 are accepted only in Sandbox.
 
+## Configure AI categorization
+
+AI categorization is optional and disabled until a provider is configured. Open
+**Settings → AI provider** and choose one of these protocols:
+
+- OpenAI Responses
+- OpenAI-compatible Chat Completions, including compatible hosted gateways or
+  local servers
+- Anthropic Messages
+- Google Gemini
+
+Enter the API endpoint, provider model ID, and an API key when the provider
+requires one. Moneta does not lock categorization to a specific model or vendor;
+provider-specific request formatting is isolated behind adapters, while the
+prompt, supported categories, validation, batching, and database state are
+shared.
+
+Natural-language rules can be added in the same form. For example:
+
+```text
+Transactions from Acme Payroll are Paychecks.
+Peer-to-peer payment memos mentioning lunch or dinner are Restaurants & Bars.
+```
+
+New uncategorized transactions retain a deterministic fallback category until
+AI categorization succeeds. Moneta sends multiple pending transactions together,
+up to 50 per provider request. Failed requests keep the existing category and
+can be retried with **Categorize pending**. Categories explicitly selected by a
+user are authoritative. Use **Re-categorize all** after changing models or rules
+when you intentionally want to replace existing categories.
+
+Manual entry and CSV import offer a **Protect category from AI** option.
+Protected transactions are persistently excluded from automatic categorization,
+**Categorize pending**, explicit AI requests, and **Re-categorize all**. Their
+categories can still be changed manually.
+
+The Settings page shows live processed, categorized, failed, and request counts
+while a run is active. Every provider response must contain exactly the requested
+transaction IDs. If a provider reaches its output limit or omits transactions,
+Moneta retries the affected records in smaller batches, with a bounded attempt
+limit. Authentication failures, outages, and other systemic errors stop the run
+instead of continuing through the remaining batches. Anthropic thinking is
+disabled for this classification workload so it cannot consume the JSON output
+budget.
+
+The complete source payload received for each new Plaid, CSV, demo, or manual
+transaction is stored locally for future re-categorization. It is not sent to
+the AI provider. Moneta extracts a compact, shared evidence record containing
+the signed amount, description, and account type plus useful fields that are
+actually available, such as merchant, memo, counterparty, source categories,
+transaction code, and investment facts. Batches are serialized as TOON to avoid
+repeating field names; provider responses remain schema-validated JSON.
+
+Older transactions are backfilled with the details already present in Moneta,
+because source fields that were never stored cannot be recovered retroactively.
+
+Categorization sends the compact evidence fields and natural-language rules to
+the configured AI provider. It does not send transaction dates, payment channels,
+account or institution names, balances, external IDs, locations, or full source
+payloads. Review that provider's privacy and data-retention terms before using
+the feature with real financial data.
+
 ## Local data and security
 
 By default, all persistent state is stored in `finance.db`, including:
 
 - Accounts and transactions
 - Plaid configuration and access tokens
+- AI provider configuration, API key, categorization rules, and original
+  transaction details
 - Saved report views
 - Balance history, holdings, and cached market prices
 
@@ -121,21 +189,33 @@ When using `FINANCE_DB_PATH`, its containing directory must already exist.
 
 ## CSV import
 
-CSV files require `date`, `merchant`, `amount`, and `category` columns. Optional
-columns are `note` and `external_id`.
+CSV files require `date`, `amount`, and either `description` or `merchant`.
+`category` is no longer required.
 
 ```csv
-date,merchant,amount,category
-2026-07-01,Example Payroll,3500,Paychecks
-2026-07-02,Local Market,-82.14,Groceries
-2026-07-03,Local Market Refund,20.00,Groceries
+date,amount,description,merchant,memo,source_category,source_category_detail,transaction_code
+2026-07-01,3500,ACH CREDIT ACME PAYROLL,Acme Payroll,,INCOME,INCOME_WAGES,DDA_TRANSACTION
+2026-07-02,-82.14,CARD PURCHASE LOCAL MARKET,Local Market,,FOOD_AND_DRINK,FOOD_AND_DRINK_GROCERIES,
+2026-07-03,20.00,CARD REFUND LOCAL MARKET,Local Market,Refund,FOOD_AND_DRINK,FOOD_AND_DRINK_GROCERIES,
 ```
 
+Optional categorization evidence columns are `merchant`, `memo` or `note`,
+`counterparty`, `source_category`, `source_category_detail`, `transaction_code`,
+`investment_action`, `investment_subtype`, `security_name`, `ticker`, `quantity`,
+`price`, and `fees`. Empty optional fields are not sent to the AI provider.
+
+Use `moneta_category` to provide an authoritative supported Moneta category.
+For backward compatibility, `category` is accepted as an alias. If either value
+matches a supported category, Moneta keeps it without automatic AI
+categorization. An unrecognized `category` is treated as a source category hint.
+Enable **Protect imported categories from AI** when imported or fallback
+categories must also remain unchanged during future AI runs.
+
 Amounts are signed: positive values are money in or credits, while negative
-values are money out or charges. Classification comes only from the category's
-group. Categories in Income are income, categories in Transfers are transfers,
-and all other categories are expenses. A positive expense, such as the refund
-above, reduces the expense total without being reclassified as income.
+values are money out or charges. Classification comes only from the resulting
+category's group. Categories in Income are income, categories in Transfers are
+transfers, and all other categories are expenses. A positive expense, such as
+the refund above, reduces the expense total without being reclassified as income.
 
 Use a stable `external_id` when available to make repeated imports safely skip
 the same records. CSV import remains available for institutions or products not
