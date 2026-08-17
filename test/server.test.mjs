@@ -262,6 +262,8 @@ test("static app is served",async()=>{
   assert.match(html,/Cash flow/);
   assert.match(html,/Protect this category from AI/);
   assert.match(html,/Protect imported categories from AI/);
+  assert.match(html,/class="close-btn" value="cancel" formnovalidate/);
+  assert.match(html,/class="quiet-btn" value="cancel" formnovalidate>Cancel/);
   assert.match(html,/cashflowSankey/);
   assert.match(html,/cashflowBarTooltip/);
   assert.match(html,/cashflowMonthDetailsRows/);

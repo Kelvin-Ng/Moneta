@@ -232,7 +232,7 @@
 
   <dialog id="transactionDialog">
     <form method="dialog" id="transactionForm">
-      <div class="panel-header"><div><h2>Add transaction</h2><p>The category group determines whether this is income, an expense, or a transfer.</p></div><button class="close-btn" value="cancel">×</button></div>
+      <div class="panel-header"><div><h2>Add transaction</h2><p>The category group determines whether this is income, an expense, or a transfer.</p></div><button class="close-btn" value="cancel" formnovalidate>×</button></div>
       <div class="form-grid">
         <label class="full">Description<input required name="merchant" placeholder="e.g. Neighborhood market"></label>
         <label>Signed amount<input required name="amount" type="number" step="0.01" placeholder="-45.00"><span>Positive for money in or credits; negative for money out or charges.</span></label>
@@ -242,13 +242,13 @@
         <label class="full">Note <span>(optional)</span><textarea name="note" placeholder="Add a little context"></textarea></label>
         <label class="full ai-protection-option"><input type="checkbox" id="manualDisableAI" name="disable_ai_categorization"><span><strong>Protect this category from AI</strong><small>AI categorization and “Re-categorize all” will always skip this transaction.</small></span></label>
       </div>
-      <div class="dialog-actions"><button class="quiet-btn" value="cancel">Cancel</button><button class="primary-btn" value="default" id="saveTransaction">Add transaction</button></div>
+      <div class="dialog-actions"><button class="quiet-btn" value="cancel" formnovalidate>Cancel</button><button class="primary-btn" value="default" id="saveTransaction">Add transaction</button></div>
     </form>
   </dialog>
 
   <dialog id="connectDialog">
     <form method="dialog">
-      <div class="panel-header"><div><h2 id="connectTitle">Connect an account</h2><p id="connectSubtitle">Choose the kind of account to link securely</p></div><button class="close-btn" value="cancel">×</button></div>
+      <div class="panel-header"><div><h2 id="connectTitle">Connect an account</h2><p id="connectSubtitle">Choose the kind of account to link securely</p></div><button class="close-btn" value="cancel" formnovalidate>×</button></div>
       <div class="connection-choices" id="connectionChoices">
         <button value="cancel" data-connect-type="bank"><b>▤</b><span><strong>Bank or credit card</strong><small>Checking, savings, loans, and cards</small></span><i>→</i></button>
         <button value="cancel" data-connect-type="investment"><b>⌁</b><span><strong>Investment account</strong><small>Brokerages, retirement, and portfolios</small></span><i>→</i></button>
@@ -264,20 +264,20 @@
 
   <dialog id="importDialog">
     <form method="dialog" id="importForm">
-      <div class="panel-header"><div><h2>Import transactions</h2><p>Required CSV columns: date, amount, and description or merchant</p></div><button class="close-btn" value="cancel">×</button></div>
+      <div class="panel-header"><div><h2>Import transactions</h2><p>Required CSV columns: date, amount, and description or merchant</p></div><button class="close-btn" value="cancel" formnovalidate>×</button></div>
       <label class="upload-box"><input type="file" id="csvFile" accept=".csv,text/csv"><span>⇧</span><strong>Choose a CSV file</strong><small>Duplicate rows are safely skipped</small></label>
       <label class="select-label">Import into<select id="importAccount"></select></label>
       <label class="ai-protection-option"><input type="checkbox" id="importDisableAI"><span><strong>Protect imported categories from AI</strong><small>Every imported row will be skipped by automatic categorization and “Re-categorize all.”</small></span></label>
       <div class="dedupe-note"><span>↔</span><div><strong>Transfer matching is automatic</strong><p>Matching bank withdrawals and card payments are paired and excluded from expenses.</p></div></div>
-      <div class="dialog-actions"><button class="quiet-btn" value="cancel">Cancel</button><button class="primary-btn" id="runImport" value="default">Import file</button></div>
+      <div class="dialog-actions"><button class="quiet-btn" value="cancel" formnovalidate>Cancel</button><button class="primary-btn" id="runImport" value="default">Import file</button></div>
     </form>
   </dialog>
   <dialog id="saveViewDialog">
     <form method="dialog" id="saveViewForm">
-      <div class="panel-header"><div><h2>Save report view</h2><p>Save the current report settings, not calculated values.</p></div><button class="close-btn" value="cancel">×</button></div>
+      <div class="panel-header"><div><h2>Save report view</h2><p>Save the current report settings, not calculated values.</p></div><button class="close-btn" value="cancel" formnovalidate>×</button></div>
       <label class="save-view-name">View name<input required maxlength="80" id="viewName" name="name" placeholder="e.g. Monthly household spending"></label>
       <div class="report-settings-summary" id="reportSettingsSummary"></div>
-      <div class="dialog-actions"><button class="quiet-btn" value="cancel">Cancel</button><button class="primary-btn" value="default">Save view</button></div>
+      <div class="dialog-actions"><button class="quiet-btn" value="cancel" formnovalidate>Cancel</button><button class="primary-btn" value="default">Save view</button></div>
     </form>
   </dialog>
   <div class="toast" id="toast"></div>
