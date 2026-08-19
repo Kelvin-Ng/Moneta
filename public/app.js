@@ -12,6 +12,10 @@ let cashFlowBarChartState=null;
 const monitoredPlaidItems=new Set();
 let plaidSyncPollTimer=null,announcePlaidSync=false,plaidSyncError=null;
 
+function accountContext(account){
+  return [account.institution,account.nickname?account.official_name:null,account.type].filter(Boolean).join(" · ");
+}
+
 async function request(path, options) {
   const res=await fetch(path,{headers:{"content-type":"application/json"},...options});
   const data=await res.json();
@@ -224,12 +228,14 @@ function renderAccounts(){
   $("#accountsGrid").innerHTML=state.accounts.map(a=>{
     const syncing=a.plaid_status==="syncing";
     const syncLabel=syncing?`<span class="sync-status" role="status"><i></i> Syncing…</span>`:`<button class="sync-button ${a.plaid_status==="sync_error"?"sync-error":""}" data-sync="${a.plaid_item_id}">${a.plaid_status==="sync_error"?"⚠ Retry sync":"↻ Sync from bank"}</button>`;
-    return `<article class="account-card ${syncing?"account-syncing":""}"><div class="account-logo" style="background:${a.color}">${a.institution.slice(0,2).toUpperCase()}</div><div><strong>${escapeHtml(a.institution)}</strong><small>${escapeHtml(a.name)} · ${a.type}</small></div><div class="account-balance">${fmt(a.balance)}<div class="account-actions">${a.plaid_item_id?syncLabel:`<span class="sync">● Local account</span>`}<button class="remove-account-button" data-remove-account="${a.id}" data-account-name="${escapeHtml(`${a.institution} · ${a.name}`)}" ${syncing?"disabled":""}>Remove</button></div></div></article>`;
+    const officialName=a.official_name||a.name;
+    const identity=`<div class="account-identity ${a.nickname?"has-nickname":""}">${a.nickname?`<span class="account-nickname">${escapeHtml(a.nickname)}</span>`:""}<strong>${escapeHtml(a.institution)}</strong><small>${escapeHtml(officialName)} · ${escapeHtml(a.type)}</small></div>`;
+    return `<article class="account-card ${syncing?"account-syncing":""}"><div class="account-logo" style="background:${a.color}">${a.institution.slice(0,2).toUpperCase()}</div>${identity}<div class="account-balance">${fmt(a.balance)}<div class="account-actions">${a.plaid_item_id?syncLabel:`<span class="sync">● Local account</span>`}<button class="nickname-account-button" data-edit-account-nickname="${a.id}">Nickname</button><button class="remove-account-button" data-remove-account="${a.id}" data-account-name="${escapeHtml(`${a.name} · ${a.institution}`)}" ${syncing?"disabled":""}>Remove</button></div></div></article>`;
   }).join("");
   const anySyncing=state.accounts.some(account=>account.plaid_status==="syncing");
   $("#syncAllBtn").disabled=anySyncing;
   $("#syncAllBtn").textContent=anySyncing?"Syncing…":"↻ Sync all";
-  const options=state.accounts.map(a=>`<option value="${a.id}">${escapeHtml(a.institution)} · ${escapeHtml(a.name)}</option>`).join("");
+  const options=state.accounts.map(a=>`<option value="${a.id}">${escapeHtml(a.name)} · ${escapeHtml(a.institution)}</option>`).join("");
   $("#accountSelect").innerHTML=options;$("#importAccount").innerHTML=options;
 }
 
@@ -311,7 +317,7 @@ function renderNetWorth(){
 
   const allSelected=!state.filters.accounts.size;
   $("#netWorthAccountFilters").innerHTML=`<button class="account-filter-chip ${allSelected?"active":""}" data-net-worth-all>All accounts</button>`+state.accounts.map(account=>`<button class="account-filter-chip ${allSelected||state.filters.accounts.has(String(account.id))?"active":""}" data-net-worth-account="${account.id}"><i style="background:${account.color}"></i>${escapeHtml(account.name)}</button>`).join("");
-  $("#netWorthAccountList").innerHTML=data.accounts.map(account=>`<div class="net-worth-account-row"><i style="background:${account.color}"></i><div><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(account.institution)} · ${escapeHtml(account.type)}</small></div><b class="${account.balance<0?"negative":""}">${fmt(account.balance)}</b></div>`).join("")||`<p class="net-worth-empty">Select at least one account to calculate net worth.</p>`;
+  $("#netWorthAccountList").innerHTML=data.accounts.map(account=>`<div class="net-worth-account-row"><i style="background:${account.color}"></i><div><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(accountContext(account))}</small></div><b class="${account.balance<0?"negative":""}">${fmt(account.balance)}</b></div>`).join("")||`<p class="net-worth-empty">Select at least one account to calculate net worth.</p>`;
 
   const svg=$("#netWorthChart"),history=data.history;
   if(!history.length){netWorthChartState=null;$("#netWorthTooltip").hidden=true;svg.setAttribute("viewBox","0 0 1000 360");svg.innerHTML=`<text x="500" y="180" text-anchor="middle" class="axis-label">No net worth data in this range</text>`;return}
@@ -652,7 +658,7 @@ function renderSankey(){
 }
 
 function buildFilterOptions(){
-  $("#accountChecks").innerHTML=state.accounts.map(a=>`<label><input type="checkbox" value="${a.id}" ${state.filters.accounts.has(String(a.id))?"checked":""}>${escapeHtml(a.institution)} · ${escapeHtml(a.name)}</label>`).join("");
+  $("#accountChecks").innerHTML=state.accounts.map(a=>`<label><input type="checkbox" value="${a.id}" ${state.filters.accounts.has(String(a.id))?"checked":""}>${escapeHtml(a.name)} · ${escapeHtml(a.institution)}</label>`).join("");
   $("#categoryChecks").innerHTML=state.categoryGroups.map((group,index)=>`<section class="category-filter-group"><label class="category-group-option"><input type="checkbox" data-category-group="${index}"><strong>${escapeHtml(group.name)}</strong></label><div>${group.categories.map(category=>`<label><input type="checkbox" data-category value="${escapeHtml(category)}" ${state.filters.categories.has(category)?"checked":""}>${escapeHtml(category)}</label>`).join("")}</div></section>`).join("");
   renderCategorySelect();
   syncCategoryGroupChecks();
@@ -758,6 +764,39 @@ async function syncPlaid(itemId) {
   }catch(error){toast(error.message);await load(true)}
 }
 
+function openAccountNickname(accountId){
+  const account=state.accounts.find(item=>item.id===Number(accountId));
+  if(!account)return;
+  $("#accountNicknameId").value=account.id;
+  $("#accountNickname").value=account.nickname||"";
+  $("#accountNicknameContext").textContent=`Choose the name shown for ${account.official_name} at ${account.institution}.`;
+  $("#accountNicknameDialog").showModal();
+  $("#accountNickname").focus();
+  $("#accountNickname").select();
+}
+
+async function saveAccountNickname(){
+  const button=$("#saveAccountNickname");
+  if(button.disabled)return;
+  const accountId=Number($("#accountNicknameId").value),nickname=$("#accountNickname").value.trim();
+  if(!Number.isInteger(accountId)||accountId<=0)return toast("Choose an account before saving its nickname");
+  button.disabled=true;button.textContent="Saving…";
+  let saved;
+  try{
+    saved=await request(`/api/accounts/${accountId}`,{method:"PATCH",body:JSON.stringify({nickname})});
+  }catch(error){
+    toast(`Nickname was not saved: ${error.message}`);
+    button.disabled=false;button.textContent="Save nickname";
+    return;
+  }
+  state.accounts=state.accounts.map(account=>account.id===accountId?{...account,...saved}:account);
+  renderAccounts();buildFilterOptions();
+  $("#accountNicknameDialog").close();
+  button.disabled=false;button.textContent="Save nickname";
+  toast(nickname?"Account nickname saved":"Account nickname cleared");
+  try{await load(true)}catch(error){toast(`Nickname saved, but refreshing the page failed: ${error.message}`)}
+}
+
 async function removeAccount(accountId, accountName) {
   const message = `Remove ${accountName}?\n\nThis will delete this account and its transactions from the local database.`;
   if(!confirm(message)) return;
@@ -839,6 +878,7 @@ function bind(){
   $("#syncAllBtn").onclick=()=>syncPlaid();
   $("#accountsGrid").onclick=e=>{
     const syncId=e.target.dataset.sync;if(syncId)return syncPlaid(syncId);
+    const nicknameId=e.target.dataset.editAccountNickname;if(nicknameId)return openAccountNickname(nicknameId);
     const removeId=e.target.dataset.removeAccount;if(removeId)return removeAccount(removeId,e.target.dataset.accountName||"this account");
   };
   $("#importBtn").onclick=()=>$("#importDialog").showModal();
@@ -870,6 +910,8 @@ function bind(){
       $("#saveViewDialog").close();toast("Report view saved");await openSavedView(view);
     }catch(error){toast(error.message)}
   };
+  $$("[data-close-account-nickname]").forEach(button=>button.onclick=()=>$("#accountNicknameDialog").close());
+  $("#accountNicknameForm").onsubmit=event=>{event.preventDefault();saveAccountNickname()};
   $("#transactionForm").onsubmit=async e=>{
     const trigger=e.submitter;if(trigger?.value==="cancel")return;
     e.preventDefault();const data=Object.fromEntries(new FormData(e.currentTarget));

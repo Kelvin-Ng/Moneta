@@ -8,6 +8,7 @@ database and can import financial data through Plaid or CSV.
 
 - Unified activity classified by category group: Income, Transfers, or expenses
 - Plaid connections for supported banks, cards, and brokerages
+- Optional account nicknames shown throughout reports, filters, and transaction lists
 - Credit-card payment matching so transfers are not counted as duplicate expenses
 - Monarch-style category groups and categories
 - Batched AI categorization with provider-neutral rules and re-categorization

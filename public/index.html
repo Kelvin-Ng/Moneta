@@ -280,6 +280,15 @@
       <div class="dialog-actions"><button class="quiet-btn" value="cancel" formnovalidate>Cancel</button><button class="primary-btn" value="default">Save view</button></div>
     </form>
   </dialog>
+  <dialog id="accountNicknameDialog">
+    <form method="dialog" id="accountNicknameForm">
+      <div class="panel-header"><div><h2>Account nickname</h2><p id="accountNicknameContext">Choose the name shown throughout Moneta.</p></div><button class="close-btn" type="button" data-close-account-nickname>×</button></div>
+      <input type="hidden" id="accountNicknameId">
+      <label class="save-view-name">Nickname <span>(optional)</span><input maxlength="80" id="accountNickname" name="nickname" placeholder="e.g. Daily checking"></label>
+      <p class="connector-note">Leave this blank to use the name supplied by the financial institution.</p>
+      <div class="dialog-actions"><button class="quiet-btn" type="button" data-close-account-nickname>Cancel</button><button class="primary-btn" type="submit" id="saveAccountNickname">Save nickname</button></div>
+    </form>
+  </dialog>
   <div class="toast" id="toast"></div>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
   <script type="module" src="/app.js"></script>

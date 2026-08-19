@@ -23,6 +23,7 @@ db.exec(`
     id INTEGER PRIMARY KEY,
     institution TEXT NOT NULL,
     name TEXT NOT NULL,
+    nickname TEXT,
     type TEXT NOT NULL CHECK(type IN ('checking','savings','credit','investment','cash')),
     balance REAL NOT NULL DEFAULT 0,
     color TEXT NOT NULL DEFAULT '#6d5dfc',
@@ -147,6 +148,7 @@ function ensureColumn(table, name, definition) {
 }
 ensureColumn("accounts", "plaid_item_id", "INTEGER REFERENCES plaid_items(id)");
 ensureColumn("accounts", "external_account_id", "TEXT");
+ensureColumn("accounts", "nickname", "TEXT");
 ensureColumn("security_price_fetches", "requested_from", "TEXT NOT NULL DEFAULT '9999-12-31'");
 ensureColumn("transactions", "original_details_json", "TEXT NOT NULL DEFAULT '{}'");
 ensureColumn("transactions", "category_source", "TEXT NOT NULL DEFAULT 'legacy'");
@@ -155,6 +157,11 @@ ensureColumn("transactions", "categorization_error", "TEXT");
 ensureColumn("transactions", "categorized_at", "TEXT");
 ensureColumn("transactions", "ai_categorization_disabled", "INTEGER NOT NULL DEFAULT 0");
 db.exec("DROP INDEX IF EXISTS account_external_id; CREATE UNIQUE INDEX account_external_id ON accounts(external_account_id);");
+
+function accountForClient(account) {
+  const officialName=account.official_name??account.name;
+  return {...account,official_name:officialName,name:String(account.nickname||"").trim()||officialName};
+}
 
 const getSetting = key => db.prepare("SELECT value FROM settings WHERE key=?").get(key)?.value;
 const saveSetting = db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
@@ -1286,7 +1293,7 @@ function listTransactions(params) {
     const q = `%${params.get("search")}%`; values.push(q,q,q);
   }
   return db.prepare(`
-    SELECT t.*, a.name account_name, a.institution, a.color account_color
+    SELECT t.*, COALESCE(NULLIF(a.nickname,''),a.name) account_name, a.institution, a.color account_color
     FROM transactions t JOIN accounts a ON a.id=t.account_id
     WHERE ${clauses.join(" AND ")}
     ORDER BY t.date DESC, t.id DESC
@@ -1474,7 +1481,7 @@ async function reconstructInvestmentAccount(account,through) {
 async function ensureInvestmentHistories(accountIds,through) {
   const selected=Array.isArray(accountIds)&&accountIds.length;
   const where=selected?`AND id IN (${accountIds.map(()=>"?").join(",")})`:"";
-  const accounts=db.prepare(`SELECT id,name,balance FROM accounts WHERE type='investment' ${where}`).all(...(selected?accountIds:[]));
+  const accounts=db.prepare(`SELECT id,COALESCE(NULLIF(nickname,''),name) name,balance FROM accounts WHERE type='investment' ${where}`).all(...(selected?accountIds:[]));
   const results=[];
   for(const account of accounts)results.push(await reconstructInvestmentAccount(account,through));
   return {accounts:results,warnings:results.flatMap(result=>result.warnings)};
@@ -1485,7 +1492,7 @@ function netWorthHistory(params) {
   const accountFilter = params.has("accounts");
   if (accountFilter && !requestedIds.length) return {history:[],accounts:[],latest:0,change:0,snapshot_dates:0};
   const where = accountFilter ? `WHERE id IN (${requestedIds.map(()=>"?").join(",")})` : "";
-  const accounts = db.prepare(`SELECT id,institution,name,type,balance,color FROM accounts ${where} ORDER BY id`).all(...requestedIds);
+  const accounts = db.prepare(`SELECT id,institution,name AS official_name,nickname,type,balance,color FROM accounts ${where} ORDER BY id`).all(...requestedIds).map(accountForClient);
   if (!accounts.length) return {history:[],accounts:[],latest:0,change:0,snapshot_dates:0};
 
   const ids = accounts.map(account=>account.id), placeholders = ids.map(()=>"?").join(",");
@@ -1545,7 +1552,7 @@ async function api(req, res, url) {
     const accounts = db.prepare(`
       SELECT a.*, p.status plaid_status, p.last_sync plaid_last_sync
       FROM accounts a LEFT JOIN plaid_items p ON p.id=a.plaid_item_id ORDER BY a.id
-    `).all();
+    `).all().map(accountForClient);
     const transactions = listTransactions(url.searchParams);
     const dbCategories = db.prepare("SELECT DISTINCT category FROM transactions ORDER BY category").all();
     const categories = [...new Set([...MONARCH_CATEGORIES, ...dbCategories.map(row=>row.category)])];
@@ -1790,6 +1797,15 @@ async function api(req, res, url) {
       .run(v.institution,v.name,v.type,Number(v.balance||0),v.color||"#6d5dfc");
     const id=Number(r.lastInsertRowid);snapshotAccountBalances([id],"manual");
     return json(res,{id},201);
+  }
+  if (req.method === "PATCH" && /^\/api\/accounts\/\d+$/.test(url.pathname)) {
+    const id=Number(url.pathname.split("/").pop()),v=await body(req);
+    if(!Object.hasOwn(v,"nickname"))return json(res,{error:"nickname is required"},400);
+    const account=db.prepare("SELECT * FROM accounts WHERE id=?").get(id);
+    if(!account)return json(res,{error:"Account not found"},404);
+    const nickname=String(v.nickname??"").trim().slice(0,80)||null;
+    db.prepare("UPDATE accounts SET nickname=? WHERE id=?").run(nickname,id);
+    return json(res,accountForClient(db.prepare("SELECT * FROM accounts WHERE id=?").get(id)));
   }
   if (req.method === "DELETE" && /^\/api\/accounts\/\d+$/.test(url.pathname)) {
     const id = Number(url.pathname.split("/").pop());

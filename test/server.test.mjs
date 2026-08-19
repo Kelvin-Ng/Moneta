@@ -160,6 +160,7 @@ test("a fresh database is empty until demo data is explicitly generated",async()
   const database=new DatabaseSync(join(temp,"test.db"));
   assert.equal(database.prepare("PRAGMA table_info(transactions)").all().some(column=>column.name==="kind"),false);
   assert.equal(database.prepare("PRAGMA table_info(transactions)").all().some(column=>column.name==="ai_categorization_disabled"),true);
+  assert.equal(database.prepare("PRAGMA table_info(accounts)").all().some(column=>column.name==="nickname"),true);
   database.close();
 });
 
@@ -273,6 +274,8 @@ test("static app is served",async()=>{
   assert.match(html,/aiSettingsForm/);
   assert.match(html,/recategorizeAllBtn/);
   assert.match(html,/generateDemoBtn/);
+  assert.match(html,/accountNicknameForm/);
+  assert.match(html,/id="saveAccountNickname"/);
 });
 
 test("client routes support direct visits and refreshes",async()=>{
@@ -348,6 +351,26 @@ test("accounts can be removed along with their local transactions",async()=>{
   assert.equal(txRes.status,201);
   const txId=(await txRes.json()).id;
 
+  const nicknameResponse=await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{
+    method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({nickname:"Travel Cash"})
+  });
+  assert.equal(nicknameResponse.status,200);
+  const nicknamedAccount=await nicknameResponse.json();
+  assert.equal(nicknamedAccount.name,"Travel Cash");
+  assert.equal(nicknamedAccount.official_name,"Pocket");
+  assert.equal(nicknamedAccount.nickname,"Travel Cash");
+  const nicknameData=await (await fetch(`http://localhost:${port}/api/bootstrap`)).json();
+  assert.equal(nicknameData.accounts.find(account=>account.id===accountId).name,"Travel Cash");
+  assert.equal(nicknameData.transactions.find(transaction=>transaction.id===txId).account_name,"Travel Cash");
+  const nicknameNetWorth=await (await fetch(`http://localhost:${port}/api/net-worth?accounts=${accountId}`)).json();
+  assert.equal(nicknameNetWorth.accounts[0].name,"Travel Cash");
+
+  const clearNickname=await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{
+    method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({nickname:""})
+  });
+  assert.equal(clearNickname.status,200);
+  assert.equal((await clearNickname.json()).name,"Pocket");
+
   const removed=await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
   assert.equal(removed.status,200);
   assert.equal((await removed.json()).transactions_deleted,1);
@@ -420,6 +443,12 @@ test("Plaid Link token, exchange, account persistence, and transaction sync work
   assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-out").category_group,"Food & Dining");
   assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-in").category_group,"Income");
 
+  const nicknameResponse=await fetch(`http://localhost:${port}/api/accounts/${checking.id}`,{
+    method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({nickname:"Household Checking"})
+  });
+  assert.equal(nicknameResponse.status,200);
+  assert.equal((await nicknameResponse.json()).official_name,checking.name);
+
   const database=new DatabaseSync(join(temp,"test.db"));
   database.prepare(`UPDATE transactions SET category='Personal',category_source='ai',categorization_status='categorized',
     original_details_json=? WHERE external_id='plaid:tx-out'`).run(JSON.stringify({source:"legacy-plaid",merchant:"Corner Market"}));
@@ -453,6 +482,11 @@ test("Plaid Link token, exchange, account persistence, and transaction sync work
     if(status.items.find(item=>item.id===result.item_id)?.status==="connected")break;
   }
   plaidSyncDelay=0;
+  const afterRefresh=await (await fetch(`http://localhost:${port}/api/bootstrap?from=2026-07-01&to=2026-07-31`)).json();
+  const refreshedChecking=afterRefresh.accounts.find(account=>account.external_account_id==="checking-test");
+  assert.equal(refreshedChecking.name,"Household Checking");
+  assert.equal(refreshedChecking.official_name,checking.name);
+  assert.equal(afterRefresh.transactions.find(tx=>tx.external_id==="plaid:tx-out").account_name,"Household Checking");
 
   const deleteChecking=await fetch(`http://localhost:${port}/api/accounts/${checking.id}`,{method:"DELETE"});
   assert.equal(deleteChecking.status,200);
