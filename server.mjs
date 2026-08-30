@@ -165,6 +165,18 @@ function accountForClient(account) {
 
 const getSetting = key => db.prepare("SELECT value FROM settings WHERE key=?").get(key)?.value;
 const saveSetting = db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+function initializeInvestmentReconstructionPolicy() {
+  if(getSetting("investment_reconstruction_policy")==="complete-close-prices-v2")return;
+  db.exec("BEGIN");
+  try{
+    db.prepare(`DELETE FROM account_balance_history
+      WHERE source='reconstructed' AND account_id IN (SELECT id FROM accounts WHERE type='investment')`).run();
+    db.prepare("DELETE FROM investment_reconstruction_state").run();
+    saveSetting.run("investment_reconstruction_policy","complete-close-prices-v2");
+    db.exec("COMMIT");
+  }catch(error){db.exec("ROLLBACK");throw error}
+}
+initializeInvestmentReconstructionPolicy();
 function initializePlaidSettings() {
   if (getSetting("plaid_settings_initialized")) return;
   const environment=["sandbox","development","production"].includes(process.env.PLAID_ENV)?process.env.PLAID_ENV:"sandbox";
@@ -1057,7 +1069,7 @@ function saveInvestmentSecurities(securities = []) {
 }
 
 function invalidateInvestmentHistory(accountId,date) {
-  db.prepare("DELETE FROM account_balance_history WHERE account_id=? AND source='reconstructed' AND date>=?").run(accountId,date);
+  db.prepare("DELETE FROM account_balance_history WHERE account_id=? AND source IN ('reconstructed','inferred_zero') AND date>=?").run(accountId,date);
   db.prepare(`
     INSERT INTO investment_reconstruction_state(account_id,invalidated_from) VALUES(?,?)
     ON CONFLICT(account_id) DO UPDATE SET invalidated_from=CASE
@@ -1092,6 +1104,7 @@ function saveInvestmentHoldings(itemRowId, holdings = [], securities = []) {
     const prior=[...previousQuantities].filter(([key])=>key.startsWith(`${account.id}\u0000`)).map(([key,quantity])=>[key.split("\u0000")[1],quantity]).sort();
     const next=holdings.filter(holding=>accountMap.get(holding.account_id)===account.id).map(holding=>[holding.security_id,Number(holding.quantity||0)]).sort();
     if(JSON.stringify(prior)!==JSON.stringify(next)){
+      db.prepare("DELETE FROM account_balance_history WHERE account_id=? AND source='inferred_zero'").run(account.id);
       const start=db.prepare("SELECT MIN(date) date FROM investment_ledger WHERE account_id=?").get(account.id)?.date||new Date().toISOString().slice(0,10);
       invalidateInvestmentHistory(account.id,start);
     }
@@ -1160,11 +1173,18 @@ function upsertPlaidTransaction(transaction, investment = false, {preserveClassi
   return db.prepare("SELECT id FROM transactions WHERE external_id=?").get(externalId)?.id||null;
 }
 
-async function syncPlaidItem(itemRowId, {restartTransactions=false,preserveClassification=false,categorize=true}={}) {
+async function syncPlaidItem(itemRowId, {restartTransactions=false,preserveClassification=false,categorize=true,refreshInvestments=true}={}) {
   const item = db.prepare("SELECT * FROM plaid_items WHERE id=?").get(itemRowId);
   if (!item) throw new Error("Connected item not found");
   db.prepare("UPDATE plaid_items SET status='syncing',error_code=NULL WHERE id=?").run(item.id);
-  const accountsData = await plaid("/accounts/get", {access_token:item.access_token});
+  let accountsData = await plaid("/accounts/get", {access_token:item.access_token});
+  const hasInvestments=accountsData.accounts.some(account=>account.type==="investment");
+  let investmentRefreshed=false;
+  if(hasInvestments&&refreshInvestments){
+    await plaid("/investments/refresh",{access_token:item.access_token});
+    investmentRefreshed=true;
+    accountsData=await plaid("/accounts/get",{access_token:item.access_token});
+  }
   savePlaidAccounts(item.id, item.institution_name, accountsData.accounts);
 
   let cursor = restartTransactions ? undefined : item.cursor || undefined, added = 0, modified = 0, removed = 0, transactionsUpdateStatus = null;
@@ -1195,7 +1215,7 @@ async function syncPlaidItem(itemRowId, {restartTransactions=false,preserveClass
 
   let investments = 0;
   let investmentsPending = false;
-  if (accountsData.accounts.some(account => account.type === "investment")) {
+  if (hasInvestments) {
     try {
       const holdingsData=await plaid("/investments/holdings/get",{access_token:item.access_token});
       saveInvestmentHoldings(item.id,holdingsData.holdings||[],holdingsData.securities||[]);
@@ -1233,7 +1253,7 @@ async function syncPlaidItem(itemRowId, {restartTransactions=false,preserveClass
   if(!preserveClassification)detectTransfers();
   const categorization=categorize?await categorizeTransactions({transactionIds:categorizationIds})
     : {configured:aiConfigured(),requested:0,categorized:0,failed:0,requests:0,errors:[]};
-  return {added,modified,removed,investments,pending,transactions_update_status:transactionsUpdateStatus,categorization};
+  return {added,modified,removed,investments,investment_refreshed:investmentRefreshed,pending,transactions_update_status:transactionsUpdateStatus,categorization};
 }
 
 const legacyPlaidCountForItem = itemId => db.prepare(`SELECT COUNT(*) count
@@ -1242,7 +1262,7 @@ const legacyPlaidCountForItem = itemId => db.prepare(`SELECT COUNT(*) count
 
 async function reimportLegacyPlaidItem(itemId) {
   const legacyBefore=legacyPlaidCountForItem(itemId);
-  const sync=await syncPlaidItem(itemId,{restartTransactions:true,preserveClassification:true,categorize:false});
+  const sync=await syncPlaidItem(itemId,{restartTransactions:true,preserveClassification:true,categorize:false,refreshInvestments:false});
   const legacyRemaining=legacyPlaidCountForItem(itemId);
   return {...sync,legacy_before:legacyBefore,raw_responses_stored:legacyBefore-legacyRemaining,legacy_remaining:legacyRemaining};
 }
@@ -1259,7 +1279,7 @@ function startPlaidSync(itemId) {
     const totals={item_id:itemId,added:0,modified:0,removed:0,investments:0};
     try {
       for(let attempt=0;attempt<PLAID_SYNC_MAX_ATTEMPTS;attempt++){
-        const result=await syncPlaidItem(itemId);
+        const result=await syncPlaidItem(itemId,{refreshInvestments:attempt===0});
         for(const key of ["added","modified","removed","investments"])totals[key]+=result[key]||0;
         if(!result.pending)return {...totals,pending:false,transactions_update_status:result.transactions_update_status};
         await wait(PLAID_SYNC_RETRY_MS);
@@ -1378,7 +1398,7 @@ function marketSymbol(security) {
 async function ensureSecurityPrices(security,from,through) {
   if (security.is_cash_equivalent) return null;
   const symbol=marketSymbol(security);
-  if (!symbol) return `${security.name||security.security_id}: no public ticker; using the latest institution price`;
+  if (!symbol) return `${security.name||security.security_id}: no public ticker; carrying forward the latest stored closing price`;
   const prior=db.prepare("SELECT requested_from,attempted_through FROM security_price_fetches WHERE security_id=?").get(security.security_id);
   if (prior&&prior.requested_from<=from&&prior.attempted_through>=through) return null;
   const start=prior?.requested_from&&prior.requested_from<from?prior.requested_from:from;
@@ -1401,20 +1421,18 @@ async function ensureSecurityPrices(security,from,through) {
       ON CONFLICT(security_id) DO UPDATE SET requested_from=MIN(requested_from,excluded.requested_from),
         attempted_through=MAX(attempted_through,excluded.attempted_through),updated_at=CURRENT_TIMESTAMP
     `).run(security.security_id,start,through);
-    return timestamps.length?null:`${security.name||symbol}: no daily prices returned; using transaction and institution prices`;
+    return timestamps.length?null:`${security.name||symbol}: no daily prices returned; carrying forward the latest stored closing price`;
   } catch (error) {
     db.prepare(`
       INSERT INTO security_price_fetches(security_id,requested_from,attempted_through) VALUES(?,?,?)
       ON CONFLICT(security_id) DO UPDATE SET requested_from=MIN(requested_from,excluded.requested_from),
         attempted_through=MAX(attempted_through,excluded.attempted_through),updated_at=CURRENT_TIMESTAMP
     `).run(security.security_id,start,through);
-    return `${security.name||symbol}: ${error.message}; using transaction and institution prices`;
+    return `${security.name||symbol}: ${error.message}; carrying forward the latest stored closing price`;
   }
 }
 
 async function reconstructInvestmentAccount(account,through) {
-  const state=db.prepare("SELECT reconstructed_through,invalidated_from FROM investment_reconstruction_state WHERE account_id=?").get(account.id);
-  if (state?.reconstructed_through>=through&&!state.invalidated_from) return {account_id:account.id,through,extended:false,warnings:[]};
   const ledger=db.prepare("SELECT * FROM investment_ledger WHERE account_id=? ORDER BY date,external_id").all(account.id);
   const holdings=db.prepare(`
     SELECT h.*,s.ticker_symbol,s.name security_name,s.type security_type,s.subtype security_subtype,
@@ -1422,7 +1440,37 @@ async function reconstructInvestmentAccount(account,through) {
     FROM investment_holdings h JOIN investment_securities s ON s.security_id=h.security_id
     WHERE h.account_id=?
   `).all(account.id);
-  if (!ledger.length&&!holdings.length) return {account_id:account.id,through,extended:false,warnings:[`${account.name}: sync holdings and investment transactions before reconstruction`]};
+  if (!ledger.length&&!holdings.length) {
+    const zeroBalance=Math.abs(Number(account.balance||0))<0.005;
+    const priorNonzero=Boolean(db.prepare("SELECT 1 present FROM account_balance_history WHERE account_id=? AND ABS(balance)>=0.005 LIMIT 1").get(account.id));
+    const syncDate=String(account.plaid_last_sync||account.last_sync||"").slice(0,10);
+    const connected=Boolean(account.plaid_item_id)&&account.plaid_status==="connected";
+    const hasCompletedSync=/^\d{4}-\d{2}-\d{2}$/.test(syncDate);
+    const inferenceDate=through;
+    const eligible=zeroBalance&&!priorNonzero&&connected&&hasCompletedSync;
+    if(eligible){
+      db.prepare(`INSERT INTO account_balance_history(account_id,date,balance,source) VALUES(?,?,0,'inferred_zero')
+        ON CONFLICT(account_id,date) DO UPDATE SET balance=0,source='inferred_zero',created_at=CURRENT_TIMESTAMP`).run(account.id,inferenceDate);
+      db.prepare(`INSERT INTO investment_reconstruction_state(account_id,reconstructed_through,invalidated_from)
+        VALUES(?,?,NULL) ON CONFLICT(account_id) DO UPDATE SET reconstructed_through=excluded.reconstructed_through,
+          invalidated_from=NULL,updated_at=CURRENT_TIMESTAMP`).run(account.id,inferenceDate);
+      return {account_id:account.id,through,extended:true,days_written:1,inferred_zero:true,inference_date:inferenceDate,warnings:[]};
+    }
+    if(!zeroBalance||priorNonzero||account.plaid_status==="sync_error"){
+      db.prepare("DELETE FROM account_balance_history WHERE account_id=? AND source='inferred_zero'").run(account.id);
+      db.prepare("DELETE FROM investment_reconstruction_state WHERE account_id=?").run(account.id);
+    }
+    const reason=!zeroBalance
+      ? "has a nonzero institutional balance but no holdings or investment transactions"
+      : priorNonzero
+        ? "has prior nonzero balance history, so an empty-account zero cannot be inferred"
+        : !connected
+          ? "does not have a completed Plaid investment sync"
+          : "does not have a completed sync date from which an empty-account zero can be inferred";
+    return {account_id:account.id,through,extended:false,inferred_zero:false,warnings:[`${account.name}: ${reason}`]};
+  }
+  const state=db.prepare("SELECT reconstructed_through,invalidated_from FROM investment_reconstruction_state WHERE account_id=?").get(account.id);
+  if (state?.reconstructed_through>=through&&!state.invalidated_from) return {account_id:account.id,through,extended:false,warnings:[]};
   const start=ledger[0]?.date||through;
   const securityIds=[...new Set([...ledger.map(row=>row.security_id),...holdings.map(row=>row.security_id)].filter(Boolean))];
   const securities=securityIds.length?db.prepare(`SELECT * FROM investment_securities WHERE security_id IN (${securityIds.map(()=>"?").join(",")})`).all(...securityIds):[];
@@ -1431,25 +1479,23 @@ async function reconstructInvestmentAccount(account,through) {
     const results=await Promise.all(securities.slice(index,index+6).map(security=>ensureSecurityPrices(security,start,through)));
     warnings.push(...results.filter(Boolean));
   }
-  const saveExecutionPrice=db.prepare("INSERT OR IGNORE INTO security_prices(security_id,date,close,source) VALUES(?,?,?,'execution')");
-  ledger.forEach(row=>{if(row.security_id&&row.price>0)saveExecutionPrice.run(row.security_id,row.date,row.price)});
-  const prices=securityIds.length?db.prepare(`SELECT security_id,date,close FROM security_prices WHERE security_id IN (${securityIds.map(()=>"?").join(",")}) AND date<=? ORDER BY date`).all(...securityIds,through):[];
+  const prices=securityIds.length?db.prepare(`SELECT security_id,date,close FROM security_prices
+    WHERE security_id IN (${securityIds.map(()=>"?").join(",")}) AND date<=? AND source IN ('plaid','yahoo') ORDER BY date`).all(...securityIds,through):[];
   const pricesByDate=new Map(),lastPrices=new Map();
   prices.forEach(row=>{
     if(row.date<start)lastPrices.set(row.security_id,row.close);
     else{if(!pricesByDate.has(row.date))pricesByDate.set(row.date,[]);pricesByDate.get(row.date).push(row)}
   });
-  holdings.forEach(holding=>{if(!lastPrices.has(holding.security_id)&&Number(holding.institution_price)>0)lastPrices.set(holding.security_id,Number(holding.institution_price))});
   const currentQuantities=new Map(holdings.map(holding=>[holding.security_id,Number(holding.quantity||0)]));
   const quantities=new Map(currentQuantities);
   for(const row of ledger)if(row.security_id)quantities.set(row.security_id,(quantities.get(row.security_id)||0)-Number(row.quantity||0));
-  const currentSecurities=holdings.reduce((sum,holding)=>sum+Number(holding.institution_value||Number(holding.quantity||0)*Number(holding.institution_price||0)),0);
   const cashDelta=ledger.reduce((sum,row)=>sum-Number(row.amount||0),0);
-  let cash=Number(account.balance)-currentSecurities-cashDelta;
+  let cash=-cashDelta;
   const events=new Map();ledger.forEach(row=>{if(!events.has(row.date))events.set(row.date,[]);events.get(row.date).push(row)});
-  const exact=new Map(db.prepare("SELECT date,balance FROM account_balance_history WHERE account_id=? AND source!='reconstructed' AND date>=? AND date<=?").all(account.id,start,through).map(row=>[row.date,row.balance]));
-  const saveBalance=db.prepare("INSERT OR IGNORE INTO account_balance_history(account_id,date,balance,source) VALUES(?,?,?,'reconstructed')");
-  let written=0;
+  const saveBalance=db.prepare(`INSERT INTO account_balance_history(account_id,date,balance,source) VALUES(?,?,?,'reconstructed')
+    ON CONFLICT(account_id,date) DO UPDATE SET balance=excluded.balance,source='reconstructed',created_at=CURRENT_TIMESTAMP`);
+  const removeIncompleteBalance=db.prepare("DELETE FROM account_balance_history WHERE account_id=? AND date=? AND source='reconstructed'");
+  let written=0,skipped=0;
   db.exec("BEGIN");
   try{
     for(let cursor=new Date(`${start}T12:00:00Z`);cursor<=new Date(`${through}T12:00:00Z`);cursor.setUTCDate(cursor.getUTCDate()+1)){
@@ -1460,13 +1506,15 @@ async function reconstructInvestmentAccount(account,through) {
       }
       for(const price of pricesByDate.get(date)||[])lastPrices.set(price.security_id,price.close);
       let value=cash;
+      let complete=true;
       for(const [securityId,quantity] of quantities){
         if(Math.abs(quantity)<1e-10)continue;
         const price=lastPrices.get(securityId);
         if(Number.isFinite(price))value+=quantity*price;
+        else complete=false;
       }
-      if(exact.has(date)){cash+=exact.get(date)-value;value=exact.get(date)}
-      written+=saveBalance.run(account.id,date,value).changes;
+      if(complete)written+=saveBalance.run(account.id,date,value).changes;
+      else{removeIncompleteBalance.run(account.id,date);skipped++}
     }
     db.exec("COMMIT");
   }catch(error){db.exec("ROLLBACK");throw error}
@@ -1475,13 +1523,15 @@ async function reconstructInvestmentAccount(account,through) {
     VALUES(?,?,NULL) ON CONFLICT(account_id) DO UPDATE SET reconstructed_through=excluded.reconstructed_through,
       invalidated_from=NULL,updated_at=CURRENT_TIMESTAMP
   `).run(account.id,through);
-  return {account_id:account.id,through,extended:Boolean(written),days_written:written,warnings};
+  return {account_id:account.id,through,extended:Boolean(written),days_written:written,days_skipped:skipped,warnings};
 }
 
 async function ensureInvestmentHistories(accountIds,through) {
   const selected=Array.isArray(accountIds)&&accountIds.length;
-  const where=selected?`AND id IN (${accountIds.map(()=>"?").join(",")})`:"";
-  const accounts=db.prepare(`SELECT id,COALESCE(NULLIF(nickname,''),name) name,balance FROM accounts WHERE type='investment' ${where}`).all(...(selected?accountIds:[]));
+  const where=selected?`AND a.id IN (${accountIds.map(()=>"?").join(",")})`:"";
+  const accounts=db.prepare(`SELECT a.id,COALESCE(NULLIF(a.nickname,''),a.name) name,a.balance,a.last_sync,a.plaid_item_id,
+    p.status plaid_status,p.last_sync plaid_last_sync FROM accounts a LEFT JOIN plaid_items p ON p.id=a.plaid_item_id
+    WHERE a.type='investment' ${where}`).all(...(selected?accountIds:[]));
   const results=[];
   for(const account of accounts)results.push(await reconstructInvestmentAccount(account,through));
   return {accounts:results,warnings:results.flatMap(result=>result.warnings)};
@@ -1490,10 +1540,10 @@ async function ensureInvestmentHistories(accountIds,through) {
 function netWorthHistory(params) {
   const requestedIds = (params.get("accounts") || "").split(",").map(Number).filter(id=>Number.isInteger(id)&&id>0);
   const accountFilter = params.has("accounts");
-  if (accountFilter && !requestedIds.length) return {history:[],accounts:[],latest:0,change:0,snapshot_dates:0};
+  if (accountFilter && !requestedIds.length) return {history:[],accounts:[],latest:0,change:0,closing_dates:0};
   const where = accountFilter ? `WHERE id IN (${requestedIds.map(()=>"?").join(",")})` : "";
   const accounts = db.prepare(`SELECT id,institution,name AS official_name,nickname,type,balance,color FROM accounts ${where} ORDER BY id`).all(...requestedIds).map(accountForClient);
-  if (!accounts.length) return {history:[],accounts:[],latest:0,change:0,snapshot_dates:0};
+  if (!accounts.length) return {history:[],accounts:[],latest:0,change:0,closing_dates:0};
 
   const ids = accounts.map(account=>account.id), placeholders = ids.map(()=>"?").join(",");
   const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? String(value) : "";
@@ -1517,33 +1567,67 @@ function netWorthHistory(params) {
     WHERE account_id IN (${placeholders}) AND date>=? AND date<=?
     GROUP BY account_id,date
   `).all(...ids,from,today);
-  const snapshots = db.prepare(`
+  const reconstructedBalances = db.prepare(`
     SELECT account_id,date,balance,source FROM account_balance_history
-    WHERE account_id IN (${placeholders}) AND date>=? AND date<=?
+    WHERE account_id IN (${placeholders}) AND date>=? AND date<=? AND source IN ('reconstructed','inferred_zero')
   `).all(...ids,from,today);
-  const txByAccount = new Map(), snapshotsByAccount = new Map();
+  const txByAccount = new Map(), reconstructedByAccount = new Map();
   transactions.forEach(row=>{if(!txByAccount.has(row.account_id))txByAccount.set(row.account_id,new Map());txByAccount.get(row.account_id).set(row.date,row.amount)});
-  snapshots.forEach(row=>{if(!snapshotsByAccount.has(row.account_id))snapshotsByAccount.set(row.account_id,new Map());snapshotsByAccount.get(row.account_id).set(row.date,row.balance)});
+  reconstructedBalances.forEach(row=>{
+    if(row.date===today)return;
+    if(!reconstructedByAccount.has(row.account_id))reconstructedByAccount.set(row.account_id,new Map());
+    reconstructedByAccount.get(row.account_id).set(row.date,row.balance);
+  });
 
-  const totals = new Map();
+  // Build a separate closing-balance series for each account. Transaction and
+  // price dates are already accounting-date labels, so they are never parsed as
+  // instants or moved between timezone buckets here.
+  const closingsByAccount = new Map();
   for (const account of accounts) {
-    let balance = account.balance;
-    const tx = account.type === "investment" ? new Map() : (txByAccount.get(account.id) || new Map());
-    const known = snapshotsByAccount.get(account.id) || new Map();
-    for (let cursor = new Date(`${today}T12:00:00Z`); cursor >= new Date(`${from}T12:00:00Z`); cursor.setUTCDate(cursor.getUTCDate()-1)) {
-      const date = cursor.toISOString().slice(0,10);
-      if (known.has(date)) balance = known.get(date);
-      if (date <= to) totals.set(date,(totals.get(date)||0)+balance);
-      balance -= tx.get(date) || 0;
+    if(account.type==="investment"){
+      closingsByAccount.set(account.id,reconstructedByAccount.get(account.id)||new Map());
+      continue;
     }
+    let balance=account.balance;
+    const tx=txByAccount.get(account.id)||new Map(),closings=new Map();
+    for(let cursor=new Date(`${today}T12:00:00Z`);cursor>=new Date(`${from}T12:00:00Z`);cursor.setUTCDate(cursor.getUTCDate()-1)){
+      const date=cursor.toISOString().slice(0,10);
+      // Today's value is the current institutional balance, not a closing
+      // balance. Remove today's posted activity before emitting prior closes.
+      if(date===today){balance-=tx.get(date)||0;continue}
+      if(date<=to)closings.set(date,balance);
+      balance-=tx.get(date)||0;
+    }
+    closingsByAccount.set(account.id,closings);
   }
-  const history = [...totals].map(([date,value])=>({date,value})).sort((a,b)=>a.date.localeCompare(b.date));
+
+  // Earlier history can sum whichever selected accounts have a balance for a
+  // source-labelled date. Only the newest historical date is withheld when it
+  // is not yet present for every selected account, avoiding a misleading latest
+  // close while preserving longer histories and accounts with no transactions.
+  const historicalDates=[...new Set([...closingsByAccount.values()].flatMap(closes=>[...closes.keys()]))]
+    .filter(date=>date>=from&&date<=to&&date!==today)
+    .sort((a,b)=>a.localeCompare(b));
+  const latestHistoricalDate=historicalDates.at(-1);
+  const latestHistoricalComplete=latestHistoricalDate
+    ? accounts.every(account=>closingsByAccount.get(account.id)?.has(latestHistoricalDate))
+    : false;
+  const history=historicalDates
+    .filter(date=>date!==latestHistoricalDate||latestHistoricalComplete)
+    .map(date=>({
+      date,
+      value:accounts.reduce((sum,account)=>sum+(closingsByAccount.get(account.id)?.get(date)??0),0),
+      current:false
+    }));
+  const latest=accounts.reduce((sum,account)=>sum+account.balance,0);
+  const closingDates=history.length;
+  if(from<=today&&to>=today)history.push({date:today,value:latest,current:true});
   return {
     history,
     accounts,
-    latest:accounts.reduce((sum,account)=>sum+account.balance,0),
+    latest,
     change:history.length>1?history.at(-1).value-history[0].value:0,
-    snapshot_dates:new Set(snapshots.filter(snapshot=>snapshot.source!=="reconstructed").map(snapshot=>snapshot.date)).size
+    closing_dates:closingDates
   };
 }
 
@@ -1634,7 +1718,8 @@ async function api(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/net-worth") {
     const accountIds=(url.searchParams.get("accounts")||"").split(",").map(Number).filter(id=>Number.isInteger(id)&&id>0);
-    const reconstruction=await ensureInvestmentHistories(url.searchParams.has("accounts")?accountIds:null,new Date().toISOString().slice(0,10));
+    const historicalThrough=new Date();historicalThrough.setUTCDate(historicalThrough.getUTCDate()-1);
+    const reconstruction=await ensureInvestmentHistories(url.searchParams.has("accounts")?accountIds:null,historicalThrough.toISOString().slice(0,10));
     return json(res,{...netWorthHistory(url.searchParams),reconstruction});
   }
   if (req.method === "POST" && url.pathname === "/api/plaid/link-token") {

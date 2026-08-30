@@ -14,6 +14,7 @@ const temp=mkdtempSync(join(tmpdir(),"moneta-test-"));
 let server, plaidServer;
 let plaidSyncDelay=0;
 let plaidTransactionStatuses=[];
+let plaidInvestmentRefreshes=0;
 let aiRequests=[];
 let aiResponseMode="";
 let aiResponseDelay=0;
@@ -64,28 +65,34 @@ test.before(async()=>{
       return res.end(JSON.stringify({choices:[{message:{content:text}}]}));
     }
     if(req.url.startsWith("/v8/finance/chart/")){
-      const today=new Date(),yesterday=new Date(today);yesterday.setUTCDate(today.getUTCDate()-1);
+      const today=new Date(),twoDaysAgo=new Date(today);twoDaysAgo.setUTCDate(today.getUTCDate()-2);
       res.writeHead(200,{"content-type":"application/json"});
       return res.end(JSON.stringify({chart:{result:[{
-        timestamp:[Math.floor(yesterday.getTime()/1000),Math.floor(today.getTime()/1000)],
+        timestamp:[Math.floor(twoDaysAgo.getTime()/1000),Math.floor(today.getTime()/1000)],
         indicators:{quote:[{close:[200,250]}]},meta:{exchangeTimezoneName:"America/New_York"}
       }],error:null}}));
     }
+    if(req.url==="/investments/refresh"){
+      plaidInvestmentRefreshes++;
+      res.writeHead(200,{"content-type":"application/json"});
+      return res.end(JSON.stringify({request_id:`investment-refresh-${plaidInvestmentRefreshes}`}));
+    }
     const today=new Date(),yesterday=new Date(today);yesterday.setUTCDate(today.getUTCDate()-1);
-    const investmentSecurity={security_id:"security-test",ticker_symbol:"TEST",name:"Test Equity",type:"equity",subtype:"common stock",is_cash_equivalent:false,close_price:250,close_price_as_of:today.toISOString().slice(0,10),iso_currency_code:"USD"};
+    const refreshedInvestmentPrice=250+plaidInvestmentRefreshes*10;
+    const investmentSecurity={security_id:"security-test",ticker_symbol:"TEST",name:"Test Equity",type:"equity",subtype:"common stock",is_cash_equivalent:false,close_price:refreshedInvestmentPrice,close_price_as_of:today.toISOString().slice(0,10),iso_currency_code:"USD"};
     const replies={
       "/link/token/create":{link_token:"link-sandbox-test",expiration:"2030-01-01T00:00:00Z"},
       "/item/public_token/exchange":payload.public_token==="public-investment-test"
         ? {access_token:"access-investment-test",item_id:"item-investment-test"}
         : {access_token:"access-sandbox-test",item_id:"item-test"},
       "/accounts/get":{accounts:payload.access_token==="access-investment-test"?[
-        {account_id:"investment-test",name:"Fidelity Brokerage",official_name:"Brokerage",type:"investment",subtype:"brokerage",balances:{current:25000,available:null}}
+        {account_id:"investment-test",name:"Fidelity Brokerage",official_name:"Brokerage",type:"investment",subtype:"brokerage",balances:{current:refreshedInvestmentPrice*100,available:null}}
       ]:[
         {account_id:"checking-test",name:"Plaid Checking",official_name:"Test Checking",type:"depository",subtype:"checking",balances:{current:1250,available:1200}},
         {account_id:"credit-test",name:"Plaid Credit Card",official_name:"Test Visa",type:"credit",subtype:"credit card",balances:{current:325,available:4675}}
       ]},
       "/investments/holdings/get":payload.access_token==="access-investment-test"?{
-        holdings:[{account_id:"investment-test",security_id:"security-test",quantity:100,institution_price:250,institution_price_as_of:today.toISOString().slice(0,10),institution_value:25000,cost_basis:18000}],
+        holdings:[{account_id:"investment-test",security_id:"security-test",quantity:100,institution_price:refreshedInvestmentPrice,institution_price_as_of:today.toISOString().slice(0,10),institution_value:refreshedInvestmentPrice*100,cost_basis:18000}],
         securities:[investmentSecurity]
       }:{holdings:[],securities:[]},
       "/investments/transactions/get":payload.access_token==="access-investment-test"?{
@@ -310,8 +317,46 @@ test("daily net worth history can be filtered to an account",async()=>{
   assert.equal(history.history.length,2);
   assert.equal(history.history[0].value,110);
   assert.equal(history.history[1].value,100);
+  assert.equal(history.history[0].current,false);
+  assert.equal(history.history[1].current,true);
+  assert.equal(history.closing_dates,1);
   assert.equal(history.change,-10);
   await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
+});
+
+test("net worth requires complete coverage only for the latest historical date",async()=>{
+  const createAccount=async(name,balance)=>{
+    const response=await fetch(`http://localhost:${port}/api/accounts`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({institution:"Closing Coverage",name,type:"investment",balance})
+    });
+    assert.equal(response.status,201);
+    return (await response.json()).id;
+  };
+  const firstId=await createAccount("First market",100),secondId=await createAccount("Second market",200),noHistoryId=await createAccount("No transaction history",300);
+  const today=new Date(),earlierPartialDate=new Date(today),commonDate=new Date(today),latestPartialDate=new Date(today);
+  earlierPartialDate.setUTCDate(today.getUTCDate()-4);commonDate.setUTCDate(today.getUTCDate()-3);latestPartialDate.setUTCDate(today.getUTCDate()-2);
+  const date=value=>value.toISOString().slice(0,10);
+  const database=new DatabaseSync(join(temp,"test.db"));
+  const save=database.prepare(`INSERT INTO account_balance_history(account_id,date,balance,source) VALUES(?,?,?,'reconstructed')
+    ON CONFLICT(account_id,date) DO UPDATE SET balance=excluded.balance,source='reconstructed'`);
+  save.run(firstId,date(earlierPartialDate),85);save.run(firstId,date(commonDate),90);save.run(firstId,date(latestPartialDate),95);save.run(secondId,date(commonDate),190);
+  database.close();
+
+  const combined=await (await fetch(`http://localhost:${port}/api/net-worth?from=${date(earlierPartialDate)}&to=${date(today)}&accounts=${firstId},${secondId},${noHistoryId}`)).json();
+  assert.deepEqual(combined.history.map(point=>point.date),[date(earlierPartialDate),date(commonDate),date(today)]);
+  assert.deepEqual(combined.history.map(point=>point.value),[85,280,600]);
+  assert.deepEqual(combined.history.map(point=>point.current),[false,false,true]);
+  assert.equal(combined.closing_dates,2);
+
+  const filtered=await (await fetch(`http://localhost:${port}/api/net-worth?from=${date(earlierPartialDate)}&to=${date(today)}&accounts=${firstId}`)).json();
+  assert.deepEqual(filtered.history.map(point=>point.date),[date(earlierPartialDate),date(commonDate),date(latestPartialDate),date(today)]);
+  assert.deepEqual(filtered.history.map(point=>point.value),[85,90,95,100]);
+  assert.equal(filtered.closing_dates,3);
+
+  await fetch(`http://localhost:${port}/api/accounts/${firstId}`,{method:"DELETE"});
+  await fetch(`http://localhost:${port}/api/accounts/${secondId}`,{method:"DELETE"});
+  await fetch(`http://localhost:${port}/api/accounts/${noHistoryId}`,{method:"DELETE"});
 });
 
 test("report views persist configuration without calculated values",async()=>{
@@ -388,25 +433,75 @@ test("investment-only Plaid items sync successfully without a Transactions curso
   const result=await exchange.json();
   assert.equal(result.accounts,1);
   assert.equal(result.sync.investments,1);
+  assert.equal(result.sync.investment_refreshed,true);
+  assert.equal(plaidInvestmentRefreshes,1);
 
   const status=await (await fetch(`http://localhost:${port}/api/plaid/status`)).json();
   const item=status.items.find(row=>row.id===result.item_id);
   assert.equal(item.status,"connected");
   assert.equal(item.error_code,null);
   const bootstrap=await (await fetch(`http://localhost:${port}/api/bootstrap`)).json();
-  assert.ok(bootstrap.accounts.some(account=>account.external_account_id==="investment-test"));
+  const investmentAccount=bootstrap.accounts.find(account=>account.external_account_id==="investment-test");
+  assert.equal(investmentAccount.balance,26000);
   const investmentTransaction=bootstrap.transactions.find(transaction=>transaction.external_id==="plaid:investment-tx-test");
   assert.equal(investmentTransaction.category,"Buy");
   assert.equal(investmentTransaction.category_group,"Transfers");
   assert.equal(Object.hasOwn(investmentTransaction,"kind"),false);
+  const refresh=await fetch(`http://localhost:${port}/api/plaid/sync`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({item_id:result.item_id})
+  });
+  assert.equal(refresh.status,200);
+  assert.equal((await refresh.json()).results[0].investment_refreshed,true);
+  assert.equal(plaidInvestmentRefreshes,2);
+  const refreshedBootstrap=await (await fetch(`http://localhost:${port}/api/bootstrap`)).json();
+  assert.equal(refreshedBootstrap.accounts.find(account=>account.external_account_id==="investment-test").balance,27000);
   const today=new Date(),yesterday=new Date(today);yesterday.setUTCDate(today.getUTCDate()-1);
-  const history=await (await fetch(`http://localhost:${port}/api/net-worth?from=${yesterday.toISOString().slice(0,10)}&to=${today.toISOString().slice(0,10)}&accounts=${bootstrap.accounts.find(account=>account.external_account_id==="investment-test").id}`)).json();
+  const historyDatabase=new DatabaseSync(join(temp,"test.db"));
+  historyDatabase.prepare(`INSERT INTO account_balance_history(account_id,date,balance,source) VALUES(?,?,99999,'plaid')
+    ON CONFLICT(account_id,date) DO UPDATE SET balance=99999,source='plaid'`).run(investmentAccount.id,yesterday.toISOString().slice(0,10));
+  historyDatabase.close();
+  const history=await (await fetch(`http://localhost:${port}/api/net-worth?from=${yesterday.toISOString().slice(0,10)}&to=${today.toISOString().slice(0,10)}&accounts=${investmentAccount.id}`)).json();
   assert.equal(history.history[0].value,20000);
-  assert.equal(history.history.at(-1).value,25000);
+  assert.equal(history.history.at(-1).value,27000);
+  assert.equal(history.latest,27000);
   assert.equal(history.reconstruction.accounts[0].extended,true);
-  const cached=await (await fetch(`http://localhost:${port}/api/net-worth?from=${yesterday.toISOString().slice(0,10)}&to=${today.toISOString().slice(0,10)}&accounts=${bootstrap.accounts.find(account=>account.external_account_id==="investment-test").id}`)).json();
+  const reconstructedDatabase=new DatabaseSync(join(temp,"test.db"));
+  const reconstructedDay=reconstructedDatabase.prepare("SELECT balance,source FROM account_balance_history WHERE account_id=? AND date=?").get(investmentAccount.id,yesterday.toISOString().slice(0,10));
+  assert.equal(reconstructedDay.balance,20000);
+  assert.equal(reconstructedDay.source,"reconstructed");
+  assert.equal(reconstructedDatabase.prepare("SELECT COUNT(*) count FROM security_prices WHERE source='execution'").get().count,0);
+  reconstructedDatabase.close();
+  const cached=await (await fetch(`http://localhost:${port}/api/net-worth?from=${yesterday.toISOString().slice(0,10)}&to=${today.toISOString().slice(0,10)}&accounts=${investmentAccount.id}`)).json();
   assert.equal(cached.history[0].value,20000);
   assert.equal(cached.reconstruction.accounts[0].extended,false);
+
+  const emptyDatabase=new DatabaseSync(join(temp,"test.db"));
+  const emptyResult=emptyDatabase.prepare(`INSERT INTO accounts(
+    institution,name,type,balance,color,last_sync,connected,plaid_item_id,external_account_id
+  ) VALUES('Fidelity','Empty investment','investment',0,'#111827',datetime('now'),1,?,'empty-investment-test')`).run(result.item_id);
+  const emptyAccountId=Number(emptyResult.lastInsertRowid);
+  emptyDatabase.prepare("UPDATE plaid_items SET last_sync=datetime('now','-5 days') WHERE id=?").run(result.item_id);
+  emptyDatabase.close();
+  const withEmpty=await (await fetch(`http://localhost:${port}/api/net-worth?from=${yesterday.toISOString().slice(0,10)}&to=${today.toISOString().slice(0,10)}&accounts=${investmentAccount.id},${emptyAccountId}`)).json();
+  assert.equal(withEmpty.history[0].date,yesterday.toISOString().slice(0,10));
+  assert.equal(withEmpty.history[0].value,20000);
+  const inferredResult=withEmpty.reconstruction.accounts.find(account=>account.account_id===emptyAccountId);
+  assert.equal(inferredResult.inferred_zero,true);
+  assert.equal(inferredResult.inference_date,yesterday.toISOString().slice(0,10));
+  assert.deepEqual(inferredResult.warnings,[]);
+  const inferredDatabase=new DatabaseSync(join(temp,"test.db"));
+  const inferredRow=inferredDatabase.prepare("SELECT balance,source FROM account_balance_history WHERE account_id=? AND date=?").get(emptyAccountId,yesterday.toISOString().slice(0,10));
+  assert.equal(inferredRow.balance,0);
+  assert.equal(inferredRow.source,"inferred_zero");
+  inferredDatabase.prepare("UPDATE plaid_items SET status='sync_error' WHERE id=?").run(result.item_id);
+  inferredDatabase.close();
+  const failedInference=await (await fetch(`http://localhost:${port}/api/net-worth?from=${yesterday.toISOString().slice(0,10)}&to=${today.toISOString().slice(0,10)}&accounts=${emptyAccountId}`)).json();
+  assert.match(failedInference.reconstruction.warnings[0],/completed Plaid investment sync/);
+  const invalidatedDatabase=new DatabaseSync(join(temp,"test.db"));
+  assert.equal(invalidatedDatabase.prepare("SELECT COUNT(*) count FROM account_balance_history WHERE account_id=? AND source='inferred_zero'").get(emptyAccountId).count,0);
+  invalidatedDatabase.prepare("UPDATE plaid_items SET status='connected' WHERE id=?").run(result.item_id);
+  invalidatedDatabase.close();
+  await fetch(`http://localhost:${port}/api/accounts/${emptyAccountId}`,{method:"DELETE"});
 });
 
 test("Plaid Link token, exchange, account persistence, and transaction sync work",async()=>{

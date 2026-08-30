@@ -7,14 +7,20 @@ database and can import financial data through Plaid or CSV.
 ## Features
 
 - Unified activity classified by category group: Income, Transfers, or expenses
-- Plaid connections for supported banks, cards, and brokerages
+- Plaid connections for supported banks, cards, and brokerages, including on-demand investment refreshes
 - Optional account nicknames shown throughout reports, filters, and transaction lists
 - Credit-card payment matching so transfers are not counted as duplicate expenses
 - Monarch-style category groups and categories
 - Batched AI categorization with provider-neutral rules and re-categorization
 - Filterable cash-flow totals, monthly bar chart, and interactive Sankey report
-- Daily net-worth history with account filters
-- Investment-history reconstruction using transactions, holdings, and closing prices
+- Daily net-worth history that uses source-labelled dates directly, preserves
+  partial earlier history, and requires complete selected-account coverage only
+  for the newest historical date
+- A current net-worth point calculated from the latest institution-reported
+  account balances; earlier investment history uses daily closing prices
+- Auditable inferred-zero closes for successfully synced, always-empty
+  investment accounts with no holdings, ledger activity, or prior nonzero value;
+  the zero carries forward until contradictory Plaid data invalidates it
 - Saved report views whose values are recalculated from current data
 - Local SQLite persistence with no application login
 

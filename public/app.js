@@ -2,7 +2,11 @@ const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const fmt = (n, compact=false) => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:compact?0:2,notation:compact&&Math.abs(n)>9999?"compact":"standard"}).format(n);
 const iso = d => d.toISOString().slice(0,10);
-const state = {accounts:[],transactions:[],categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,snapshot_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
+const sourceDateLabel = (value,options={}) => {
+  const [year,month,day]=String(value||"").split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US",{...options,timeZone:"UTC"}).format(new Date(Date.UTC(year,month-1,day,12)));
+};
+const state = {accounts:[],transactions:[],categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,closing_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
 const colors=["#e97567","#6d5dfc","#e6a04b","#28a792","#9f938c","#60a5c5","#d577aa"];
 const sectionPaths={overview:"/overview",cashflow:"/cash-flow",networth:"/net-worth",transactions:"/transactions",accounts:"/accounts",insights:"/insights",settings:"/settings"};
 const pathSections=Object.fromEntries(Object.entries(sectionPaths).map(([section,path])=>[path,section]));
@@ -309,11 +313,14 @@ function renderNetWorth(){
   $("#netWorthChange").classList.toggle("negative",data.change<0);
   $("#netWorthChangePercent").textContent=`${data.change>=0?"↑":"↓"} ${Math.abs(percent).toFixed(1)}% over the selected range`;
   $("#netWorthAccountCount").textContent=data.accounts.length;
-  $("#netWorthRangeLabel").textContent=data.history.length?`${data.history.length} daily closing balances · ${data.snapshot_dates||0} synced snapshot date${data.snapshot_dates===1?"":"s"}`:"No balance history in this range";
+  const hasCurrent=data.history.some(point=>point.current);
+  $("#netWorthRangeLabel").textContent=data.history.length
+    ? `${data.closing_dates||0} historical closing balance${data.closing_dates===1?"":"s"}${hasCurrent?" · current balance":""}`
+    : "No balance history in this range";
   const reconstructionWarnings=data.reconstruction?.warnings||[];
   $("#netWorthNote").textContent=reconstructionWarnings.length
-    ? `Some securities used fallback pricing: ${reconstructionWarnings.join(" · ")}`
-    : "Investment history is reconstructed from positions, transactions, and daily security closing prices, then cached locally. Synced balances are used as reconciliation checkpoints.";
+    ? `Some investment history is incomplete: ${reconstructionWarnings.join(" · ")}`
+    : "Historical dates are used exactly as labelled by their sources and sum the selected accounts available on each date. The newest historical date is hidden until every selected account has reported it. The Current point sums the latest institution-reported balances.";
 
   const allSelected=!state.filters.accounts.size;
   $("#netWorthAccountFilters").innerHTML=`<button class="account-filter-chip ${allSelected?"active":""}" data-net-worth-all>All accounts</button>`+state.accounts.map(account=>`<button class="account-filter-chip ${allSelected||state.filters.accounts.has(String(account.id))?"active":""}" data-net-worth-account="${account.id}"><i style="background:${account.color}"></i>${escapeHtml(account.name)}</button>`).join("");
@@ -334,9 +341,9 @@ function renderNetWorth(){
   }
   html+=`<path d="${line} L ${x(history.length-1)} ${H-pad.b} L ${x(0)} ${H-pad.b} Z" fill="url(#netWorthFill)"/><path d="${line}" class="net-worth-line"/>`;
   const labelIndexes=[0,Math.round((history.length-1)*.25),Math.round((history.length-1)*.5),Math.round((history.length-1)*.75),history.length-1];
-  [...new Set(labelIndexes)].forEach(index=>{const point=history[index],label=new Date(`${point.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:history.length>365?"numeric":undefined});html+=`<text x="${x(index)}" y="${H-17}" text-anchor="middle" class="axis-label">${label}</text>`});
+  [...new Set(labelIndexes)].forEach(index=>{const point=history[index],label=point.current?"Current":sourceDateLabel(point.date,{month:"short",day:"numeric",year:history.length>365?"numeric":undefined});html+=`<text x="${x(index)}" y="${H-17}" text-anchor="middle" class="axis-label">${label}</text>`});
   const dotStep=Math.max(1,Math.ceil(history.length/45));
-  history.forEach((point,index)=>{if(index%dotStep&&index!==history.length-1)return;const label=new Date(`${point.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});html+=`<circle cx="${x(index)}" cy="${y(point.value)}" r="3.5" class="net-worth-point"><title>${label}: ${fmt(point.value)}</title></circle>`});
+  history.forEach((point,index)=>{if(index%dotStep&&index!==history.length-1)return;const label=point.current?"Current":sourceDateLabel(point.date,{month:"short",day:"numeric",year:"numeric"});html+=`<circle cx="${x(index)}" cy="${y(point.value)}" r="3.5" class="net-worth-point"><title>${label}: ${fmt(point.value)}</title></circle>`});
   html+=`<rect x="${pad.l}" y="${pad.t}" width="${W-pad.l-pad.r}" height="${H-pad.t-pad.b}" fill="transparent" class="net-worth-hover-target"/><g class="net-worth-hover" id="netWorthHover" opacity="0"><line class="net-worth-hover-guide" x1="0" y1="${pad.t}" x2="0" y2="${H-pad.b}"/><circle class="net-worth-hover-point" cx="0" cy="0" r="5"/></g>`;
   svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.innerHTML=html;
   netWorthChartState={history,W,H,pad,x,y,startValue};
@@ -361,9 +368,9 @@ function updateNetWorthHover(event){
   guide.setAttribute("x1",pointX);guide.setAttribute("x2",pointX);
   focus.setAttribute("cx",pointX);focus.setAttribute("cy",pointY);hover.setAttribute("opacity","1");
   const change=chart.startValue?(point.value-chart.startValue)/Math.abs(chart.startValue)*100:null;
-  const date=new Date(`${point.date}T12:00:00`).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric"});
-  const changeText=change===null?"Change unavailable":`${change>=0?"+":""}${change.toFixed(2)}% from ${new Date(`${chart.history[0].date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric"})}`;
-  tooltip.innerHTML=`<span>${date}</span><strong>${fmt(point.value)}</strong><small class="${change===null?"":change>=0?"positive":"negative"}">${changeText}</small>`;
+  const startLabel=chart.history[0].current?"Current":sourceDateLabel(chart.history[0].date,{month:"short",day:"numeric"});
+  const changeText=change===null?"Change unavailable":`${change>=0?"+":""}${change.toFixed(2)}% from ${startLabel}`;
+  tooltip.innerHTML=`<span>${point.current?"Current":sourceDateLabel(point.date,{weekday:"short",month:"short",day:"numeric",year:"numeric"})}</span><strong>${fmt(point.value)}</strong><small class="${change===null?"":change>=0?"positive":"negative"}">${changeText}</small>`;
   tooltip.hidden=false;
   const wrapper=tooltip.parentElement,wrapperBounds=wrapper.getBoundingClientRect();
   const screenX=bounds.left+pointX/chart.W*bounds.width,screenY=bounds.top+pointY/chart.H*bounds.height;
