@@ -196,8 +196,10 @@ When using `FINANCE_DB_PATH`, its containing directory must already exist.
 
 ## CSV import
 
-CSV files require `date`, `amount`, and either `description` or `merchant`.
-`category` is no longer required.
+CSV files can use any column names. After choosing a file, map its columns to
+Moneta fields in the import dialog. `Date`, `Amount`, and `Description` are the
+only required mappings; the remaining mappings are optional and can improve
+categorization.
 
 ```csv
 date,amount,description,merchant,memo,source_category,source_category_detail,transaction_code
@@ -224,9 +226,22 @@ category's group. Categories in Income are income, categories in Transfers are
 transfers, and all other categories are expenses. A positive expense, such as
 the refund above, reduces the expense total without being reclassified as income.
 
-Use a stable `external_id` when available to make repeated imports safely skip
-the same records. CSV import remains available for institutions or products not
-supported by your Plaid access level.
+Before importing, choose the fields used for duplicate matching. Moneta considers
+two transactions duplicates when all selected fields match within the destination
+account. Date, amount, and description are selected by default; mapped merchant,
+category, memo/note, and external ID fields can also be used. Text comparisons
+ignore surrounding whitespace and letter case, while dates and external IDs are
+matched exactly.
+
+For each match, choose whether to keep the existing database transaction or
+replace it with the CSV transaction. Replacement updates the existing record in
+place, including its category-protection setting. If the database already has
+multiple matching records, the oldest one is retained and the extras are removed.
+The original CSV headers and row values are stored with each imported transaction
+for future inspection and AI re-categorization.
+
+CSV import remains available for institutions or products not supported by your
+Plaid access level.
 
 ## Tests
 

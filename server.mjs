@@ -1631,6 +1631,80 @@ function netWorthHistory(params) {
   };
 }
 
+const CSV_IMPORT_FIELDS=new Set([
+  "date","amount","description","merchant","moneta_category","category","source_category_detail","memo",
+  "counterparty","transaction_code","external_id","investment_action","investment_subtype","security_name",
+  "ticker","quantity","price","fees"
+]);
+const CSV_DEDUPE_FIELDS=new Set(["date","amount","description","merchant","category","note","external_id"]);
+
+function mappedCSVRows(value){
+  if(value.csv){
+    const headers=Array.isArray(value.csv.headers)?value.csv.headers.map(header=>String(header)):null;
+    const rows=Array.isArray(value.csv.rows)?value.csv.rows:null;
+    if(!headers?.length||!rows)return null;
+    const mapping=value.column_mapping&&typeof value.column_mapping==="object"?value.column_mapping:{};
+    for(const required of ["date","amount","description"]){
+      const column=Number(mapping[required]);
+      if(!Number.isInteger(column)||column<0||column>=headers.length)throw new Error(`CSV column mapping for ${required} is required`);
+    }
+    return rows.map((values,index)=>{
+      if(!Array.isArray(values))throw new Error(`Invalid CSV row ${index+1}`);
+      const row={};
+      for(const [field,rawColumn] of Object.entries(mapping)){
+        const column=Number(rawColumn);
+        if(CSV_IMPORT_FIELDS.has(field)&&Number.isInteger(column)&&column>=0&&column<headers.length)row[field]=String(values[column]??"").trim();
+      }
+      return {row,raw:{headers,values:headers.map((_,column)=>String(values[column]??""))}};
+    });
+  }
+  if(!Array.isArray(value.rows))return null;
+  return value.rows.map((row,index)=>{
+    if(!row||typeof row!=="object"||Array.isArray(row))throw new Error(`Invalid CSV row ${index+1}`);
+    return {row,raw:row};
+  });
+}
+
+function importAmount(value){
+  const text=String(value??"").trim();
+  const accounting=/^\(.*\)$/.test(text);
+  const amount=Number(text.replace(/[,$\s]/g,"").replace(/[()]/g,""));
+  return accounting?-amount:amount;
+}
+
+function transactionDescriptionForDedupe(transaction){
+  try{
+    const original=JSON.parse(transaction.original_details_json||"{}");
+    if(original.source==="csv")return String(original.row?.description||original.row?.merchant||transaction.merchant||"").trim();
+    if(original.source==="plaid"){
+      const plaid=original.transaction||{};
+      return String(plaid.original_description||plaid.name||plaid.merchant_name||transaction.merchant||"").trim();
+    }
+    if(original.source==="manual")return String(original.submitted?.merchant||transaction.merchant||"").trim();
+  }catch{}
+  return String(transaction.merchant||"").trim();
+}
+
+function dedupeFieldValue(record,field){
+  const value=record[field];
+  if(field==="amount")return Number(value).toString();
+  const text=String(value??"").normalize("NFKC").trim();
+  if(field==="external_id"||field==="date")return text;
+  return text.toLocaleLowerCase("en-US");
+}
+
+function transactionDedupeKey(record,fields){
+  return JSON.stringify(fields.map(field=>dedupeFieldValue(record,field)));
+}
+
+function unlinkAndDeleteTransactions(records){
+  const ids=records.map(record=>Number(record.id)).filter(Number.isInteger);
+  if(!ids.length)return 0;
+  const placeholders=ids.map(()=>"?").join(",");
+  db.prepare(`UPDATE transactions SET transfer_pair_id=NULL WHERE id IN (${placeholders}) OR transfer_pair_id IN (${placeholders})`).run(...ids,...ids);
+  return db.prepare(`DELETE FROM transactions WHERE id IN (${placeholders})`).run(...ids).changes;
+}
+
 async function api(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
     const accounts = db.prepare(`
@@ -1840,17 +1914,42 @@ async function api(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/import") {
     const v = await body(req);
-    if (!v.account_id || !Array.isArray(v.rows)) return json(res,{error:"account_id and rows are required"},400);
+    const importedRows=mappedCSVRows(v);
+    if (!v.account_id || !importedRows) return json(res,{error:"account_id and CSV rows are required"},400);
+    if(!db.prepare("SELECT id FROM accounts WHERE id=?").get(Number(v.account_id)))return json(res,{error:"Import account not found"},404);
     const aiCategorizationDisabled=v.disable_ai_categorization===true;
-    let added=0, skipped=0;
-    const insert = db.prepare(`INSERT OR IGNORE INTO transactions(
+    const requestedDedupeFields=Array.isArray(v.deduplication?.fields)?v.deduplication.fields:[];
+    const dedupeFields=[...new Set((requestedDedupeFields.length?requestedDedupeFields:["date","amount","description"])
+      .map(String).filter(field=>CSV_DEDUPE_FIELDS.has(field)))];
+    if(!dedupeFields.length)return json(res,{error:"At least one valid duplicate matching field is required"},400);
+    const keep=v.deduplication?.keep==="csv"?"csv":"database";
+    let added=0,replaced=0,skipped=0,duplicatesRemoved=0;
+    const insert = db.prepare(`INSERT INTO transactions(
       account_id,date,merchant,category,amount,note,external_id,original_details_json,category_source,categorization_status,ai_categorization_disabled
     ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
+    const update = db.prepare(`UPDATE transactions SET date=?,merchant=?,category=?,amount=?,note=?,pending=0,
+      transfer_pair_id=NULL,external_id=?,original_details_json=?,category_source=?,categorization_status=?,
+      categorization_error=NULL,categorized_at=?,ai_categorization_disabled=? WHERE id=?`);
+    const existing=db.prepare(`SELECT id,date,merchant,category,amount,note,external_id,original_details_json
+      FROM transactions WHERE account_id=? ORDER BY id`).all(Number(v.account_id)).map(row=>({...row,description:transactionDescriptionForDedupe(row)}));
+    const byKey=new Map(),byExternalId=new Map();
+    const indexRecord=record=>{
+      const key=transactionDedupeKey(record,dedupeFields);
+      if(!byKey.has(key))byKey.set(key,[]);
+      byKey.get(key).push(record);
+      if(record.external_id)byExternalId.set(String(record.external_id),record);
+    };
+    const unindexRecord=record=>{
+      const key=transactionDedupeKey(record,dedupeFields),group=(byKey.get(key)||[]).filter(candidate=>candidate.id!==record.id);
+      if(group.length)byKey.set(key,group);else byKey.delete(key);
+      if(record.external_id&&byExternalId.get(String(record.external_id))?.id===record.id)byExternalId.delete(String(record.external_id));
+    };
+    existing.forEach(indexRecord);
     const categorizationIds=[];
     db.exec("BEGIN");
     try {
-      for (const [i,r] of v.rows.entries()) {
-        const amount=Number(r.amount);
+      for (const [i,{row:r,raw}] of importedRows.entries()) {
+        const amount=importAmount(r.amount);
         const description=String(r.description||r.merchant||"").trim(),merchant=String(r.merchant||description).trim();
         if (!r.date || !description || !Number.isFinite(amount)) throw new Error(`Invalid CSV row ${i+1}`);
         const requestedMonetaCategory=String(r.moneta_category||"").trim();
@@ -1861,16 +1960,37 @@ async function api(req, res, url) {
         const evidence=[description,merchant,r.memo,r.note,r.counterparty,sourceCategory,sourceCategoryDetail,r.transaction_code].filter(Boolean).join(" ");
         const hint=categoryHintFor({merchant:evidence,amount,plaidPrimary:sourceCategory,plaidDetailed:sourceCategoryDetail});
         const category=explicit||monarchCategoryFor({hint,merchant:evidence,plaidPrimary:sourceCategory,plaidDetailed:sourceCategoryDetail,force:true});
-        const key=r.external_id || `import-${v.account_id}-${r.date}-${description}-${amount}-${i}`;
-        const result=insert.run(v.account_id,r.date,merchant,category,amount,r.memo||r.note||"",key,
-          JSON.stringify({source:"csv",row:r,import_account_id:v.account_id}),explicit?"manual":"fallback",explicit||aiCategorizationDisabled?"categorized":"pending",aiCategorizationDisabled?1:0);
-        if(result.changes){added++;if(!explicit&&!aiCategorizationDisabled)categorizationIds.push(Number(result.lastInsertRowid))}else skipped++;
+        const note=String(r.memo||r.note||"").trim(),externalId=String(r.external_id||"").trim()||null;
+        const categorySource=explicit?"manual":"fallback",categorizationStatus=explicit||aiCategorizationDisabled?"categorized":"pending";
+        const original=JSON.stringify({source:"csv",row:r,raw_csv:raw,column_mapping:v.column_mapping||null,import_account_id:Number(v.account_id)});
+        const candidate={date:String(r.date).trim(),amount,description,merchant,category,note,external_id:externalId};
+        const key=transactionDedupeKey(candidate,dedupeFields);
+        const matches=[...(byKey.get(key)||[])];
+        const externalMatch=externalId?byExternalId.get(externalId):null;
+        if(externalMatch&&!matches.some(match=>match.id===externalMatch.id))matches.push(externalMatch);
+        matches.sort((left,right)=>left.id-right.id);
+        if(matches.length){
+          const keeper=matches[0],extras=matches.slice(1);
+          extras.forEach(unindexRecord);duplicatesRemoved+=unlinkAndDeleteTransactions(extras);
+          if(keep==="database"){skipped++;continue}
+          unindexRecord(keeper);
+          db.prepare("UPDATE transactions SET transfer_pair_id=NULL WHERE id=? OR transfer_pair_id=?").run(keeper.id,keeper.id);
+          const categorizedAt=categorizationStatus==="categorized"?new Date().toISOString():null;
+          update.run(candidate.date,merchant,category,amount,note,externalId,original,categorySource,categorizationStatus,categorizedAt,aiCategorizationDisabled?1:0,keeper.id);
+          Object.assign(keeper,candidate,{original_details_json:original});indexRecord(keeper);replaced++;
+          if(!explicit&&!aiCategorizationDisabled)categorizationIds.push(keeper.id);
+          continue;
+        }
+        const result=insert.run(Number(v.account_id),candidate.date,merchant,category,amount,note,externalId,original,
+          categorySource,categorizationStatus,aiCategorizationDisabled?1:0);
+        const id=Number(result.lastInsertRowid),record={id,...candidate,original_details_json:original};
+        indexRecord(record);added++;if(!explicit&&!aiCategorizationDisabled)categorizationIds.push(id);
       }
       db.exec("COMMIT");
     } catch(e) { db.exec("ROLLBACK"); throw e; }
     detectTransfers();
-    const categorization=await categorizeTransactions({transactionIds:categorizationIds});
-    return json(res,{added,skipped,categorization});
+    const categorization=await categorizeTransactions({transactionIds:[...new Set(categorizationIds)]});
+    return json(res,{added,replaced,skipped,duplicates_removed:duplicatesRemoved,deduplication:{fields:dedupeFields,keep},categorization});
   }
   if (req.method === "POST" && url.pathname === "/api/detect-transfers") {
     return json(res,detectTransfers());

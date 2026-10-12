@@ -262,6 +262,75 @@ test("CSV import works without a category and keeps explicit Moneta categories",
   await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
 });
 
+test("CSV import maps arbitrary columns and applies configurable duplicate rules",async()=>{
+  const accountResponse=await fetch(`http://localhost:${port}/api/accounts`,{
+    method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({institution:"Mapped CSV Test",name:"Flexible Import",type:"checking",balance:0})
+  });
+  const accountId=(await accountResponse.json()).id;
+  for(const note of ["Original database row","Extra database duplicate"]){
+    const response=await fetch(`http://localhost:${port}/api/transactions`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({account_id:accountId,date:"2026-09-01",merchant:"Neighborhood Shop",amount:-9,category:"Groceries",note})
+    });
+    assert.equal(response.status,201);
+  }
+  const csv={
+    headers:["Posted On","Narrative","Value","Chosen Bucket","Comment"],
+    rows:[
+      ["2026-09-01","Neighborhood Shop","($9.00)","Personal","CSV replacement"],
+      ["2026-09-02","Train ticket","-4.50","Public Transit","Morning commute"]
+    ]
+  };
+  const column_mapping={date:0,description:1,amount:2,moneta_category:3,memo:4};
+  const keepDatabase=await fetch(`http://localhost:${port}/api/import`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
+      account_id:accountId,csv,column_mapping,deduplication:{fields:["date","amount","description"],keep:"database"}
+    })
+  });
+  assert.equal(keepDatabase.status,200);
+  const kept=await keepDatabase.json();
+  assert.equal(kept.added,1);
+  assert.equal(kept.skipped,1);
+  assert.equal(kept.replaced,0);
+  assert.equal(kept.duplicates_removed,1);
+  let transactions=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions;
+  assert.equal(transactions.filter(transaction=>transaction.date==="2026-09-01"&&transaction.merchant==="Neighborhood Shop").length,1);
+  assert.equal(transactions.find(transaction=>transaction.date==="2026-09-01").note,"Original database row");
+  assert.equal(transactions.find(transaction=>transaction.date==="2026-09-02").category,"Public Transit");
+
+  const keepCsv=await fetch(`http://localhost:${port}/api/import`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
+      account_id:accountId,csv:{headers:csv.headers,rows:[csv.rows[0]]},column_mapping,
+      deduplication:{fields:["date","amount","description"],keep:"csv"},disable_ai_categorization:true
+    })
+  });
+  const replaced=await keepCsv.json();
+  assert.equal(replaced.added,0);
+  assert.equal(replaced.replaced,1);
+  transactions=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions;
+  const csvWinner=transactions.find(transaction=>transaction.date==="2026-09-01");
+  assert.equal(csvWinner.category,"Personal");
+  assert.equal(csvWinner.note,"CSV replacement");
+  assert.equal(csvWinner.ai_categorization_disabled,1);
+  const database=new DatabaseSync(join(temp,"test.db"));
+  const original=JSON.parse(database.prepare("SELECT original_details_json FROM transactions WHERE id=?").get(csvWinner.id).original_details_json);
+  assert.deepEqual(original.raw_csv.headers,csv.headers);
+  assert.deepEqual(original.raw_csv.values,csv.rows[0]);
+  database.close();
+
+  const selectedFields=await fetch(`http://localhost:${port}/api/import`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
+      account_id:accountId,csv:{headers:csv.headers,rows:[["2026-09-02","Different description","-4.50","Personal",""]]},column_mapping,
+      deduplication:{fields:["date","amount"],keep:"database"}
+    })
+  });
+  const selectedResult=await selectedFields.json();
+  assert.equal(selectedResult.skipped,1);
+  assert.equal(selectedResult.added,0);
+  await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
+});
+
 test("static app is served",async()=>{
   const res=await fetch(`http://localhost:${port}/`);
   assert.equal(res.status,200);
@@ -270,6 +339,9 @@ test("static app is served",async()=>{
   assert.match(html,/Cash flow/);
   assert.match(html,/Protect this category from AI/);
   assert.match(html,/Protect imported categories from AI/);
+  assert.match(html,/csvColumnMapping/);
+  assert.match(html,/csvDedupeFields/);
+  assert.match(html,/csvDuplicateAction/);
   assert.match(html,/class="close-btn" value="cancel" formnovalidate/);
   assert.match(html,/class="quiet-btn" value="cancel" formnovalidate>Cancel/);
   assert.match(html,/cashflowSankey/);

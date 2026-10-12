@@ -262,14 +262,30 @@
     </form>
   </dialog>
 
-  <dialog id="importDialog">
+  <dialog id="importDialog" class="import-dialog">
     <form method="dialog" id="importForm">
-      <div class="panel-header"><div><h2>Import transactions</h2><p>Required CSV columns: date, amount, and description or merchant</p></div><button class="close-btn" value="cancel" formnovalidate>×</button></div>
-      <label class="upload-box"><input type="file" id="csvFile" accept=".csv,text/csv"><span>⇧</span><strong>Choose a CSV file</strong><small>Duplicate rows are safely skipped</small></label>
+      <div class="panel-header"><div><h2>Import transactions</h2><p>Choose a file, then map its columns and duplicate rules.</p></div><button class="close-btn" value="cancel" formnovalidate>×</button></div>
+      <label class="upload-box"><input type="file" id="csvFile" accept=".csv,text/csv"><span>⇧</span><strong id="csvFileLabel">Choose a CSV file</strong><small id="csvFileSummary">Any comma-separated column names are supported</small></label>
       <label class="select-label">Import into<select id="importAccount"></select></label>
+      <div id="csvImportSetup" class="csv-import-setup" hidden>
+        <section class="csv-config-section">
+          <div class="csv-config-heading"><div><strong>Map CSV columns</strong><small>Date, amount, and description are required. Optional mappings improve categorization.</small></div></div>
+          <div id="csvColumnMapping" class="csv-mapping-grid"></div>
+        </section>
+        <section class="csv-config-section">
+          <div class="csv-config-heading"><div><strong>Duplicate matching</strong><small>Transactions match when every selected field is equal within this account.</small></div></div>
+          <div id="csvDedupeFields" class="csv-dedupe-fields"></div>
+          <label class="select-label csv-duplicate-action">When a duplicate is found
+            <select id="csvDuplicateAction">
+              <option value="database">Keep the database transaction</option>
+              <option value="csv">Replace it with the CSV transaction</option>
+            </select>
+          </label>
+        </section>
+      </div>
       <label class="ai-protection-option"><input type="checkbox" id="importDisableAI"><span><strong>Protect imported categories from AI</strong><small>Every imported row will be skipped by automatic categorization and “Re-categorize all.”</small></span></label>
       <div class="dedupe-note"><span>↔</span><div><strong>Transfer matching is automatic</strong><p>Matching bank withdrawals and card payments are paired and excluded from expenses.</p></div></div>
-      <div class="dialog-actions"><button class="quiet-btn" value="cancel" formnovalidate>Cancel</button><button class="primary-btn" id="runImport" value="default">Import file</button></div>
+      <div class="dialog-actions"><button class="quiet-btn" value="cancel" formnovalidate>Cancel</button><button class="primary-btn" id="runImport" value="default" disabled>Import file</button></div>
     </form>
   </dialog>
   <dialog id="saveViewDialog">

@@ -8,11 +8,41 @@ const sourceDateLabel = (value,options={}) => {
 };
 const state = {accounts:[],transactions:[],categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,closing_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
 const colors=["#e97567","#6d5dfc","#e6a04b","#28a792","#9f938c","#60a5c5","#d577aa"];
+const csvMappingFields=[
+  {key:"date",label:"Date",required:true,aliases:["date","transaction date","posted date","posting date"]},
+  {key:"amount",label:"Amount",required:true,aliases:["amount","transaction amount","value","total"]},
+  {key:"description",label:"Description",required:true,aliases:["description","transaction description","name","details","payee","merchant","merchant name"]},
+  {key:"merchant",label:"Merchant",aliases:["merchant","merchant name"]},
+  {key:"moneta_category",label:"Moneta category",aliases:["moneta category","moneta_category"]},
+  {key:"category",label:"Source category",aliases:["category","source category","source_category"]},
+  {key:"source_category_detail",label:"Source category detail",aliases:["source category detail","source_category_detail","category detail","category_detail"]},
+  {key:"memo",label:"Memo / note",aliases:["memo","note","notes"]},
+  {key:"counterparty",label:"Counterparty",aliases:["counterparty","counter party"]},
+  {key:"transaction_code",label:"Transaction code",aliases:["transaction code","transaction_code","type"]},
+  {key:"external_id",label:"External ID",aliases:["external id","external_id","transaction id","transaction_id","id"]},
+  {key:"investment_action",label:"Investment action",aliases:["investment action","investment_action","action"]},
+  {key:"investment_subtype",label:"Investment subtype",aliases:["investment subtype","investment_subtype","subtype"]},
+  {key:"security_name",label:"Security name",aliases:["security name","security_name"]},
+  {key:"ticker",label:"Ticker",aliases:["ticker","symbol"]},
+  {key:"quantity",label:"Quantity",aliases:["quantity","shares","units"]},
+  {key:"price",label:"Price",aliases:["price","unit price","unit_price"]},
+  {key:"fees",label:"Fees",aliases:["fees","fee"]}
+];
+const csvDedupeFields=[
+  {key:"date",label:"Date",mapping:["date"]},
+  {key:"amount",label:"Amount",mapping:["amount"]},
+  {key:"description",label:"Description",mapping:["description"]},
+  {key:"merchant",label:"Merchant",mapping:["merchant"]},
+  {key:"category",label:"Category",mapping:["moneta_category","category"]},
+  {key:"note",label:"Memo / note",mapping:["memo"]},
+  {key:"external_id",label:"External ID",mapping:["external_id"]}
+];
 const sectionPaths={overview:"/overview",cashflow:"/cash-flow",networth:"/net-worth",transactions:"/transactions",accounts:"/accounts",insights:"/insights",settings:"/settings"};
 const pathSections=Object.fromEntries(Object.entries(sectionPaths).map(([section,path])=>[path,section]));
 let sankeyHoverIndex={byGroup:new Map(),byCategory:new Map(),groupControls:new Map()},sankeyHovered=[],sankeyHoverKey="";
 let netWorthChartState=null;
 let cashFlowBarChartState=null;
+let csvImportData=null;
 const monitoredPlaidItems=new Set();
 let plaidSyncPollTimer=null,announcePlaidSync=false,plaidSyncError=null;
 
@@ -888,7 +918,13 @@ function bind(){
     const nicknameId=e.target.dataset.editAccountNickname;if(nicknameId)return openAccountNickname(nicknameId);
     const removeId=e.target.dataset.removeAccount;if(removeId)return removeAccount(removeId,e.target.dataset.accountName||"this account");
   };
-  $("#importBtn").onclick=()=>$("#importDialog").showModal();
+  $("#importBtn").onclick=()=>{
+    $("#importForm").reset();csvImportData=null;
+    $("#csvImportSetup").hidden=true;$("#runImport").disabled=true;
+    $("#csvFileLabel").textContent="Choose a CSV file";
+    $("#csvFileSummary").textContent="Any comma-separated column names are supported";
+    $("#importDialog").showModal();
+  };
   $("#filterBtn").onclick=$("#dateBtn").onclick=()=>{$("#filterPanel").classList.add("show");$("#scrim").classList.add("show")};
   const closePanel=()=>{$("#filterPanel").classList.remove("show");$("#scrim").classList.remove("show")};
   $("#scrim").onclick=closePanel;$("[data-close]").onclick=closePanel;
@@ -929,13 +965,36 @@ function bind(){
     const id=e.target.dataset.delete;if(!id)return;
     if(confirm("Delete this transaction?")){await request(`/api/transactions/${id}`,{method:"DELETE"});toast("Transaction deleted");await load(true)}
   };
+  $("#csvFile").onchange=async event=>{
+    const file=event.target.files[0];csvImportData=null;$("#runImport").disabled=true;$("#csvImportSetup").hidden=true;
+    if(!file)return;
+    try{
+      csvImportData=parseCSV(await file.text());
+      renderCSVImportSetup(csvImportData);
+      $("#csvFileLabel").textContent=file.name;
+      $("#csvFileSummary").textContent=`${csvImportData.rows.length} transaction row${csvImportData.rows.length===1?"":"s"} · ${csvImportData.headers.length} column${csvImportData.headers.length===1?"":"s"}`;
+      $("#csvImportSetup").hidden=false;updateCSVDedupeFields();$("#runImport").disabled=false;
+    }catch(error){toast(error.message);event.target.value="";$("#csvFileLabel").textContent="Choose a CSV file";$("#csvFileSummary").textContent="Any comma-separated column names are supported"}
+  };
+  $("#csvColumnMapping").onchange=updateCSVDedupeFields;
   $("#importForm").onsubmit=async e=>{
     if(e.submitter?.value==="cancel")return;e.preventDefault();
-    const file=$("#csvFile").files[0];if(!file)return toast("Choose a CSV file first");
+    if(!csvImportData)return toast("Choose a CSV file first");
     try{
-      const rows=parseCSV(await file.text());
-      const result=await request("/api/import",{method:"POST",body:JSON.stringify({account_id:Number($("#importAccount").value),rows,disable_ai_categorization:$("#importDisableAI").checked})});
-      $("#importDialog").close();toast(`Imported ${result.added}; skipped ${result.skipped}`);await load(true);
+      const columnMapping=Object.fromEntries($$("#csvColumnMapping select").filter(select=>select.value!=="").map(select=>[select.dataset.csvField,Number(select.value)]));
+      for(const field of csvMappingFields.filter(field=>field.required))if(!Number.isInteger(columnMapping[field.key]))throw new Error(`Choose a CSV column for ${field.label}`);
+      const dedupeFields=$$("#csvDedupeFields input:checked:not(:disabled)").map(input=>input.value);
+      if(!dedupeFields.length)throw new Error("Choose at least one field for duplicate matching");
+      const result=await request("/api/import",{method:"POST",body:JSON.stringify({
+        account_id:Number($("#importAccount").value),
+        csv:csvImportData,
+        column_mapping:columnMapping,
+        deduplication:{fields:dedupeFields,keep:$("#csvDuplicateAction").value},
+        disable_ai_categorization:$("#importDisableAI").checked
+      })});
+      $("#importDialog").close();
+      const details=[`Imported ${result.added}`,result.replaced?`replaced ${result.replaced}`:"",result.skipped?`skipped ${result.skipped}`:"",result.duplicates_removed?`removed ${result.duplicates_removed} extra duplicate${result.duplicates_removed===1?"":"s"}`:""].filter(Boolean).join("; ");
+      toast(details);await load(true);
     }catch(err){toast(err.message)}
   };
   $("#plaidSecret").oninput=()=>{if($("#plaidSecret").value)$("#clearPlaidSecret").checked=false};
@@ -996,13 +1055,62 @@ function bind(){
   window.addEventListener("popstate",()=>navigateFromLocation().catch(error=>toast(error.message)));
 }
 
-function parseCSV(text){
-  const lines=text.trim().split(/\r?\n/).filter(Boolean), headers=splitCSV(lines.shift()).map(x=>x.trim().toLowerCase());
-  for(const required of ["date","amount"])if(!headers.includes(required))throw new Error(`CSV needs a “${required}” column`);
-  if(!headers.includes("description")&&!headers.includes("merchant"))throw new Error("CSV needs a “description” or “merchant” column");
-  return lines.map(line=>{const vals=splitCSV(line),row={};headers.forEach((h,i)=>row[h]=vals[i]?.trim()||"");row.amount=Number(row.amount.replace(/[$,]/g,""));if(!row.date||!(row.description||row.merchant)||Number.isNaN(row.amount))throw new Error("One or more CSV rows is invalid");return row});
+function normalizeCSVHeader(value){return String(value||"").trim().toLowerCase().replace(/[_-]+/g," ").replace(/\s+/g," ")}
+
+function renderCSVImportSetup(data){
+  const normalized=data.headers.map(normalizeCSVHeader);
+  const options=(selected="")=>`<option value="">Do not import</option>`+data.headers.map((header,index)=>{
+    const sample=data.rows.find(row=>String(row[index]||"").trim())?.[index]||"";
+    const detail=sample?` — ${String(sample).replace(/\s+/g," ").slice(0,34)}`:"";
+    return `<option value="${index}" ${String(index)===String(selected)?"selected":""}>${escapeHtml(header||`Column ${index+1}`)}${escapeHtml(detail)}</option>`;
+  }).join("");
+  const claimed=new Set();
+  $("#csvColumnMapping").innerHTML=csvMappingFields.map(field=>{
+    let match=-1;
+    for(const alias of field.aliases||[]){
+      const index=normalized.findIndex((header,column)=>header===normalizeCSVHeader(alias)&&(!claimed.has(column)||field.key==="merchant"));
+      if(index>=0){match=index;break}
+    }
+    if(match>=0&&field.key!=="merchant")claimed.add(match);
+    return `<label>${field.label}${field.required?" <span>*</span>":""}<select data-csv-field="${field.key}">${options(match>=0?match:"")}</select></label>`;
+  }).join("");
+  $("#csvDedupeFields").innerHTML=csvDedupeFields.map(field=>`<label><input type="checkbox" value="${field.key}" ${["date","amount","description"].includes(field.key)?"checked":""}>${field.label}</label>`).join("");
 }
-function splitCSV(line){const out=[];let value="",quoted=false;for(let i=0;i<line.length;i++){const c=line[i];if(c==='"'&&line[i+1]==='"'){value+='"';i++}else if(c==='"')quoted=!quoted;else if(c===","&&!quoted){out.push(value);value=""}else value+=c}out.push(value);return out}
+
+function updateCSVDedupeFields(){
+  const mapped=new Set($$("#csvColumnMapping select").filter(select=>select.value!=="").map(select=>select.dataset.csvField));
+  $$("#csvDedupeFields input").forEach(input=>{
+    const definition=csvDedupeFields.find(field=>field.key===input.value);
+    const enabled=definition?.mapping.some(field=>mapped.has(field));
+    input.disabled=!enabled;if(!enabled)input.checked=false;
+    input.closest("label").classList.toggle("disabled",!enabled);
+  });
+}
+
+function parseCSV(text){
+  const table=[];let row=[],value="",quoted=false;
+  const source=String(text||"").replace(/^\uFEFF/,"");
+  for(let index=0;index<source.length;index++){
+    const character=source[index];
+    if(character==='"'&&quoted&&source[index+1]==='"'){value+='"';index++}
+    else if(character==='"')quoted=!quoted;
+    else if(character===","&&!quoted){row.push(value);value=""}
+    else if((character==="\n"||character==="\r")&&!quoted){
+      if(character==="\r"&&source[index+1]==="\n")index++;
+      row.push(value);if(row.some(cell=>String(cell).trim()))table.push(row);row=[];value="";
+    }else value+=character;
+  }
+  if(quoted)throw new Error("The CSV contains an unclosed quoted field");
+  row.push(value);if(row.some(cell=>String(cell).trim()))table.push(row);
+  if(table.length<2)throw new Error("The CSV must contain a header and at least one transaction row");
+  const headers=table.shift().map(header=>String(header).trim());
+  if(!headers.some(Boolean))throw new Error("The CSV header row is empty");
+  const rows=table.map((values,index)=>{
+    if(values.length>headers.length)throw new Error(`CSV row ${index+2} has more values than the header`);
+    return headers.map((_,column)=>String(values[column]??"").trim());
+  });
+  return {headers,rows};
+}
 
 async function initialize(){
   const hasOauthState=location.search.includes("oauth_state_id");
