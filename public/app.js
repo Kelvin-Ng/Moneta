@@ -39,6 +39,8 @@ const csvDedupeFields=[
 ];
 const sectionPaths={overview:"/overview",cashflow:"/cash-flow",networth:"/net-worth",transactions:"/transactions",accounts:"/accounts",insights:"/insights",settings:"/settings"};
 const pathSections=Object.fromEntries(Object.entries(sectionPaths).map(([section,path])=>[path,section]));
+const plaidReauthenticationErrors=new Set(["ITEM_LOGIN_REQUIRED","PENDING_EXPIRATION","PENDING_DISCONNECT"]);
+const plaidLinkTokenKey="moneta_plaid_link_token",plaidLinkContextKey="moneta_plaid_link_context";
 let sankeyHoverIndex={byGroup:new Map(),byCategory:new Map(),groupControls:new Map()},sankeyHovered=[],sankeyHoverKey="";
 let netWorthChartState=null;
 let cashFlowBarChartState=null;
@@ -261,7 +263,12 @@ function renderTransactions(){
 function renderAccounts(){
   $("#accountsGrid").innerHTML=state.accounts.map(a=>{
     const syncing=a.plaid_status==="syncing";
-    const syncLabel=syncing?`<span class="sync-status" role="status"><i></i> Syncing…</span>`:`<button class="sync-button ${a.plaid_status==="sync_error"?"sync-error":""}" data-sync="${a.plaid_item_id}">${a.plaid_status==="sync_error"?"⚠ Retry sync":"↻ Sync from bank"}</button>`;
+    const needsReauthentication=a.plaid_status==="sync_error"&&plaidReauthenticationErrors.has(a.plaid_error_code);
+    const syncLabel=syncing
+      ?`<span class="sync-status" role="status"><i></i> Syncing…</span>`
+      :needsReauthentication
+        ?`<button class="sync-button sync-error" data-reauthenticate="${a.plaid_item_id}">⚠ Re-authenticate</button>`
+        :`<button class="sync-button ${a.plaid_status==="sync_error"?"sync-error":""}" data-sync="${a.plaid_item_id}">${a.plaid_status==="sync_error"?"⚠ Retry sync":"↻ Sync from bank"}</button>`;
     const officialName=a.official_name||a.name;
     const identity=`<div class="account-identity ${a.nickname?"has-nickname":""}">${a.nickname?`<span class="account-nickname">${escapeHtml(a.nickname)}</span>`:""}<strong>${escapeHtml(a.institution)}</strong><small>${escapeHtml(officialName)} · ${escapeHtml(a.type)}</small></div>`;
     return `<article class="account-card ${syncing?"account-syncing":""}"><div class="account-logo" style="background:${a.color}">${a.institution.slice(0,2).toUpperCase()}</div>${identity}<div class="account-balance">${fmt(a.balance)}<div class="account-actions">${a.plaid_item_id?syncLabel:`<span class="sync">● Local account</span>`}<button class="nickname-account-button" data-edit-account-nickname="${a.id}">Nickname</button><button class="remove-account-button" data-remove-account="${a.id}" data-account-name="${escapeHtml(`${a.name} · ${a.institution}`)}" ${syncing?"disabled":""}>Remove</button></div></div></article>`;
@@ -727,7 +734,7 @@ async function pollPlaidSync(){
     const data=await request("/api/plaid/status"),items=new Map(data.items.map(item=>[item.id,item]));
     state.accounts=state.accounts.map(account=>{
       const item=items.get(account.plaid_item_id);
-      return item?{...account,plaid_status:item.status,plaid_last_sync:item.last_sync}:account;
+      return item?{...account,plaid_status:item.status,plaid_error_code:item.error_code,plaid_last_sync:item.last_sync}:account;
     });
     renderAccounts();
     let error=null;
@@ -764,19 +771,47 @@ async function openConnectDialog() {
   } catch(error) { toast(error.message); }
 }
 
-async function startPlaidLink(linkToken, connectionType="bank") {
+function clearPlaidLinkSession(){
+  localStorage.removeItem(plaidLinkTokenKey);
+  localStorage.removeItem(plaidLinkContextKey);
+}
+
+function storedPlaidLinkContext(){
+  try{return JSON.parse(localStorage.getItem(plaidLinkContextKey)||"null")||{}}
+  catch{return {}}
+}
+
+async function startPlaidLink(linkToken, connectionType="bank", updateItemId=null) {
   try {
     if(!window.Plaid) throw new Error("Plaid Link could not load. Check your internet connection or content blocker.");
-    const tokenData=linkToken?{link_token:linkToken}:await request("/api/plaid/link-token",{method:"POST",body:JSON.stringify({connection_type:connectionType})});
-    localStorage.setItem("moneta_plaid_link_token",tokenData.link_token);
+    const tokenData=linkToken
+      ?{link_token:linkToken,item_id:updateItemId,mode:updateItemId?"update":"create"}
+      :updateItemId
+        ?await request("/api/plaid/update-link-token",{method:"POST",body:JSON.stringify({item_id:Number(updateItemId)})})
+        :await request("/api/plaid/link-token",{method:"POST",body:JSON.stringify({connection_type:connectionType})});
+    const context={mode:tokenData.mode||"create",item_id:Number(tokenData.item_id)||null,connection_type:connectionType,institution_name:tokenData.institution_name||""};
+    localStorage.setItem(plaidLinkTokenKey,tokenData.link_token);
+    localStorage.setItem(plaidLinkContextKey,JSON.stringify(context));
     const handler=window.Plaid.create({
       token:tokenData.link_token,
       ...(location.search.includes("oauth_state_id")?{receivedRedirectUri:location.href}:{}),
       onSuccess:async(publicToken,metadata)=>{
-        toast(`Connecting ${metadata.institution?.name||"institution"}…`);
         try{
+          if(context.mode==="update"&&context.item_id){
+            const institution=context.institution_name||metadata.institution?.name||state.accounts.find(account=>account.plaid_item_id===context.item_id)?.institution||"institution";
+            toast(`Re-authenticated ${institution} · syncing…`);
+            clearPlaidLinkSession();
+            history.replaceState({},document.title,location.pathname);
+            state.accounts=state.accounts.map(account=>account.plaid_item_id===context.item_id?{...account,plaid_status:"syncing",plaid_error_code:null}:account);
+            renderAccounts();
+            const result=await request("/api/plaid/sync",{method:"POST",body:JSON.stringify({item_id:context.item_id,background:true})});
+            await load(true);await navigateSection("accounts");
+            monitorPlaidSync(result.results.map(row=>row.item_id));
+            return;
+          }
+          toast(`Connecting ${metadata.institution?.name||"institution"}…`);
           const result=await request("/api/plaid/exchange",{method:"POST",body:JSON.stringify({public_token:publicToken,institution:metadata.institution,background:true})});
-          localStorage.removeItem("moneta_plaid_link_token");
+          clearPlaidLinkSession();
           history.replaceState({},document.title,location.pathname);
           toast(`Connected ${result.accounts} account${result.accounts===1?"":"s"} · syncing…`);
           await load(true);await navigateSection("accounts");
@@ -787,6 +822,12 @@ async function startPlaidLink(linkToken, connectionType="bank") {
     });
     handler.open();
   }catch(error){toast(error.message)}
+}
+
+async function reauthenticatePlaid(itemId){
+  const account=state.accounts.find(candidate=>candidate.plaid_item_id===Number(itemId));
+  toast(`Opening ${account?.institution||"institution"} sign-in…`);
+  await startPlaidLink(null,"bank",Number(itemId));
 }
 
 async function syncPlaid(itemId) {
@@ -914,6 +955,7 @@ function bind(){
   });
   $("#syncAllBtn").onclick=()=>syncPlaid();
   $("#accountsGrid").onclick=e=>{
+    const reauthenticateId=e.target.dataset.reauthenticate;if(reauthenticateId)return reauthenticatePlaid(reauthenticateId);
     const syncId=e.target.dataset.sync;if(syncId)return syncPlaid(syncId);
     const nicknameId=e.target.dataset.editAccountNickname;if(nicknameId)return openAccountNickname(nicknameId);
     const removeId=e.target.dataset.removeAccount;if(removeId)return removeAccount(removeId,e.target.dataset.accountName||"this account");
@@ -1132,8 +1174,8 @@ async function initialize(){
   }
   await resumePlaidSyncs();
   if(hasOauthState){
-    const token=localStorage.getItem("moneta_plaid_link_token");
-    if(token)startPlaidLink(token);
+    const token=localStorage.getItem(plaidLinkTokenKey),context=storedPlaidLinkContext();
+    if(token)startPlaidLink(token,context.connection_type||"bank",context.mode==="update"?Number(context.item_id):null);
   }
 }
 initialize().catch(error=>toast(error.message));

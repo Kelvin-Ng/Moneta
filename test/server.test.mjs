@@ -15,6 +15,7 @@ let server, plaidServer;
 let plaidSyncDelay=0;
 let plaidTransactionStatuses=[];
 let plaidInvestmentRefreshes=0;
+let plaidLinkTokenRequests=[];
 let aiRequests=[];
 let aiResponseMode="";
 let aiResponseDelay=0;
@@ -22,6 +23,7 @@ test.before(async()=>{
   plaidServer=createServer(async(req,res)=>{
     let raw="";for await(const chunk of req)raw+=chunk;
     const payload=raw?JSON.parse(raw):{};
+    if(req.url==="/link/token/create")plaidLinkTokenRequests.push(payload);
     if(req.url==="/transactions/sync"&&plaidSyncDelay)await new Promise(resolve=>setTimeout(resolve,plaidSyncDelay));
     if(req.url==="/v1/chat/completions"||req.url==="/v1/responses"||req.url==="/v1/messages"||req.url.startsWith("/v1beta/models/")){
       aiRequests.push({url:req.url,payload,headers:req.headers});
@@ -414,6 +416,9 @@ test("static app is served",async()=>{
   assert.match(html,/generateDemoBtn/);
   assert.match(html,/accountNicknameForm/);
   assert.match(html,/id="saveAccountNickname"/);
+  const app=await (await fetch(`http://localhost:${port}/app.js`)).text();
+  assert.match(app,/data-reauthenticate/);
+  assert.match(app,/\/api\/plaid\/update-link-token/);
 });
 
 test("client routes support direct visits and refreshes",async()=>{
@@ -668,6 +673,34 @@ test("Plaid Link token, exchange, account persistence, and transaction sync work
   assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-in").amount,2000);
   assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-out").category_group,"Food & Dining");
   assert.equal(data.transactions.find(tx=>tx.external_id==="plaid:tx-in").category_group,"Income");
+
+  const reauthenticationDatabase=new DatabaseSync(join(temp,"test.db"));
+  reauthenticationDatabase.prepare("UPDATE plaid_items SET status='sync_error',error_code='ITEM_LOGIN_REQUIRED' WHERE id=?").run(result.item_id);
+  reauthenticationDatabase.close();
+  const needsReauthentication=await (await fetch(`http://localhost:${port}/api/bootstrap`)).json();
+  const affectedAccount=needsReauthentication.accounts.find(account=>account.external_account_id==="checking-test");
+  assert.equal(affectedAccount.plaid_status,"sync_error");
+  assert.equal(affectedAccount.plaid_error_code,"ITEM_LOGIN_REQUIRED");
+  const updateTokenResponse=await fetch(`http://localhost:${port}/api/plaid/update-link-token`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({item_id:result.item_id})
+  });
+  assert.equal(updateTokenResponse.status,200);
+  const updateToken=await updateTokenResponse.json();
+  assert.equal(updateToken.link_token,"link-sandbox-test");
+  assert.equal(updateToken.item_id,result.item_id);
+  assert.equal(updateToken.institution_name,"Plaid Test Bank");
+  assert.equal(updateToken.mode,"update");
+  const updateRequest=plaidLinkTokenRequests.at(-1);
+  assert.equal(updateRequest.access_token,"access-sandbox-test");
+  assert.equal(updateRequest.products,undefined);
+  assert.equal(updateRequest.user.client_user_id,"moneta-local-user");
+  const missingUpdateToken=await fetch(`http://localhost:${port}/api/plaid/update-link-token`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({item_id:999999})
+  });
+  assert.equal(missingUpdateToken.status,404);
+  const restoredDatabase=new DatabaseSync(join(temp,"test.db"));
+  restoredDatabase.prepare("UPDATE plaid_items SET status='connected',error_code=NULL WHERE id=?").run(result.item_id);
+  restoredDatabase.close();
 
   const nicknameResponse=await fetch(`http://localhost:${port}/api/accounts/${checking.id}`,{
     method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({nickname:"Household Checking"})

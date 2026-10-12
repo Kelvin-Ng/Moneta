@@ -1792,7 +1792,7 @@ function unlinkAndDeleteTransactions(records){
 async function api(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
     const accounts = db.prepare(`
-      SELECT a.*, p.status plaid_status, p.last_sync plaid_last_sync
+      SELECT a.*, p.status plaid_status, p.error_code plaid_error_code, p.last_sync plaid_last_sync
       FROM accounts a LEFT JOIN plaid_items p ON p.id=a.plaid_item_id ORDER BY a.id
     `).all().map(accountForClient);
     const transactions = listTransactions(url.searchParams);
@@ -1898,6 +1898,25 @@ async function api(req, res, url) {
     if (redirectUri) payload.redirect_uri=redirectUri;
     const data = await plaid("/link/token/create", payload);
     return json(res,{link_token:data.link_token,expiration:data.expiration});
+  }
+  if (req.method === "POST" && url.pathname === "/api/plaid/update-link-token") {
+    if (!plaidConfigured()) return json(res,{error:"Plaid is not configured. Add your client ID and secret in Settings."},503);
+    const value=await body(req),itemId=Number(value.item_id);
+    if(!Number.isInteger(itemId)||itemId<=0)return json(res,{error:"A valid item_id is required"},400);
+    const item=db.prepare("SELECT id,access_token,institution_name FROM plaid_items WHERE id=?").get(itemId);
+    if(!item)return json(res,{error:"Connected item not found"},404);
+    const payload={
+      client_name:"Moneta",
+      language:"en",
+      country_codes:["US"],
+      user:{client_user_id:"moneta-local-user"},
+      access_token:item.access_token
+    };
+    const configuration=plaidConfiguration();
+    const redirectUri=validPlaidRedirectUri(configuration.redirectUri,configuration.environment);
+    if(redirectUri)payload.redirect_uri=redirectUri;
+    const data=await plaid("/link/token/create",payload);
+    return json(res,{link_token:data.link_token,expiration:data.expiration,item_id:item.id,institution_name:item.institution_name,mode:"update"});
   }
   if (req.method === "POST" && url.pathname === "/api/plaid/exchange") {
     const value = await body(req);

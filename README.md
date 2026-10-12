@@ -93,6 +93,15 @@ institutions in Development or Production require an exact HTTPS redirect URI:
 The URI cannot contain a query string or fragment. HTTP localhost redirect URIs
 are accepted only in Sandbox.
 
+### Re-authenticate a connection
+
+When Plaid reports that a connection needs renewed credentials, MFA, or consent,
+the affected account cards show **Re-authenticate** instead of **Retry sync**.
+Complete the institution's Plaid Link flow; Moneta keeps the existing Plaid Item,
+accounts, nicknames, and transaction history, then starts a background sync
+automatically. OAuth re-authentication uses the configured redirect URI and can
+resume after the browser returns to Moneta.
+
 ## Configure AI categorization
 
 AI categorization is optional and disabled until a provider is configured. Open
