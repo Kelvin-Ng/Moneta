@@ -989,6 +989,7 @@ function bind(){
         account_id:Number($("#importAccount").value),
         csv:csvImportData,
         column_mapping:columnMapping,
+        date_format:$("#csvDateFormat").value,
         deduplication:{fields:dedupeFields,keep:$("#csvDuplicateAction").value},
         disable_ai_categorization:$("#importDisableAI").checked
       })});

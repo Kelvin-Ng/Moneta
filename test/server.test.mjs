@@ -331,6 +331,64 @@ test("CSV import maps arbitrary columns and applies configurable duplicate rules
   await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
 });
 
+test("CSV import normalizes common dates and requires a choice for ambiguous numeric dates",async()=>{
+  const accountResponse=await fetch(`http://localhost:${port}/api/accounts`,{
+    method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({institution:"CSV Date Test",name:"Date Formats",type:"checking",balance:0})
+  });
+  const accountId=(await accountResponse.json()).id;
+  const headers=["When","Value","Details"],column_mapping={date:0,amount:1,description:2};
+  const importRows=async(rows,date_format="auto")=>fetch(`http://localhost:${port}/api/import`,{
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
+      account_id:accountId,csv:{headers,rows},column_mapping,date_format,
+      deduplication:{fields:["date","amount","description"],keep:"database"}
+    })
+  });
+
+  const dayFirst=await importRows([
+    ["31/08/2026","-1","Unambiguous day first"],
+    ["05/09/2026","-2","Ambiguous row inferred day first"]
+  ]);
+  assert.equal(dayFirst.status,200);
+  assert.equal((await dayFirst.json()).date_format.resolved,"dmy");
+
+  const monthFirst=await importRows([
+    ["09/30/26","-3","Unambiguous month first"],
+    ["10/01/26","-4","Second month-first row"]
+  ]);
+  assert.equal(monthFirst.status,200);
+  assert.equal((await monthFirst.json()).date_format.resolved,"mdy");
+
+  const namedAndYearFirst=await importRows([
+    ["September 7, 2026","-5","Named month"],
+    ["20260908","-6","Compact ISO"],
+    ["2026-09-09T18:30:00Z","-7","ISO timestamp"]
+  ]);
+  assert.equal(namedAndYearFirst.status,200);
+
+  const ambiguous=await importRows([["06/07/2026","-8","Needs explicit order"]]);
+  assert.equal(ambiguous.status,400);
+  assert.match((await ambiguous.json()).error,/Could not distinguish MM\/DD\/YYYY from DD\/MM\/YYYY/);
+  const explicit=await importRows([["06/07/2026","-8","Needs explicit order"]],"dmy");
+  assert.equal(explicit.status,200);
+
+  const transactions=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions;
+  const byMerchant=new Map(transactions.map(transaction=>[transaction.merchant,transaction]));
+  assert.equal(byMerchant.get("Unambiguous day first").date,"2026-08-31");
+  assert.equal(byMerchant.get("Ambiguous row inferred day first").date,"2026-09-05");
+  assert.equal(byMerchant.get("Unambiguous month first").date,"2026-09-30");
+  assert.equal(byMerchant.get("Named month").date,"2026-09-07");
+  assert.equal(byMerchant.get("Compact ISO").date,"2026-09-08");
+  assert.equal(byMerchant.get("ISO timestamp").date,"2026-09-09");
+  const explicitTransaction=byMerchant.get("Needs explicit order");
+  assert.equal(explicitTransaction.date,"2026-07-06");
+  const database=new DatabaseSync(join(temp,"test.db"));
+  const original=JSON.parse(database.prepare("SELECT original_details_json FROM transactions WHERE id=?").get(explicitTransaction.id).original_details_json);
+  database.close();
+  assert.equal(original.raw_csv.values[0],"06/07/2026");
+  await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
+});
+
 test("static app is served",async()=>{
   const res=await fetch(`http://localhost:${port}/`);
   assert.equal(res.status,200);
@@ -342,6 +400,7 @@ test("static app is served",async()=>{
   assert.match(html,/csvColumnMapping/);
   assert.match(html,/csvDedupeFields/);
   assert.match(html,/csvDuplicateAction/);
+  assert.match(html,/csvDateFormat/);
   assert.match(html,/class="close-btn" value="cancel" formnovalidate/);
   assert.match(html,/class="quiet-btn" value="cancel" formnovalidate>Cancel/);
   assert.match(html,/cashflowSankey/);

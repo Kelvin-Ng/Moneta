@@ -201,6 +201,19 @@ Moneta fields in the import dialog. `Date`, `Amount`, and `Description` are the
 only required mappings; the remaining mappings are optional and can improve
 categorization.
 
+Imported dates are validated and stored as ISO calendar dates (`YYYY-MM-DD`).
+Supported inputs include year-first dates (`2026-09-05`, `2026/09/05`, or
+`20260905`), numeric month-first or day-first dates (`09/05/2026` or
+`05/09/2026`), two-digit years, ISO timestamps, and English month names such as
+`September 5, 2026` or `5 Sep 2026`.
+
+The default **Auto-detect** setting examines the complete date column and a
+format hint such as `DD/MM/YYYY` in its header. For example, the presence of
+`31/08/2026` establishes day-first order for other rows in that import. If every
+numeric date is ambiguous, choose **Month / day / year** or **Day / month / year**
+in the import dialog. Moneta rejects invalid dates and files that demonstrably
+mix both orders instead of silently storing uncertain values.
+
 ```csv
 date,amount,description,merchant,memo,source_category,source_category_detail,transaction_code
 2026-07-01,3500,ACH CREDIT ACME PAYROLL,Acme Payroll,,INCOME,INCOME_WAGES,DDA_TRANSACTION

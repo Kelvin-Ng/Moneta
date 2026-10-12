@@ -1672,6 +1672,90 @@ function importAmount(value){
   return accounting?-amount:amount;
 }
 
+const CSV_MONTHS=new Map([
+  ["jan",1],["january",1],["feb",2],["february",2],["mar",3],["march",3],["apr",4],["april",4],
+  ["may",5],["jun",6],["june",6],["jul",7],["july",7],["aug",8],["august",8],
+  ["sep",9],["sept",9],["september",9],["oct",10],["october",10],["nov",11],["november",11],
+  ["dec",12],["december",12]
+]);
+
+function csvYear(value){
+  const text=String(value);
+  const year=Number(text);
+  if(text.length===2)return year>=70?1900+year:2000+year;
+  return year;
+}
+
+function isoCalendarDate(year,month,day){
+  year=Number(year);month=Number(month);day=Number(day);
+  if(!Number.isInteger(year)||year<1000||year>9999||!Number.isInteger(month)||month<1||month>12||!Number.isInteger(day)||day<1)return null;
+  const daysInMonth=new Date(Date.UTC(year,month,0)).getUTCDate();
+  if(day>daysInMonth)return null;
+  return `${String(year).padStart(4,"0")}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+}
+
+function yearLastNumericDate(value){
+  const match=String(value).trim().match(/^(\d{1,2})([./-])(\d{1,2})\2(\d{2}|\d{4})(?:[ T].*)?$/);
+  return match?{first:Number(match[1]),second:Number(match[3]),year:csvYear(match[4])}:null;
+}
+
+function dateOrderFromHeader(header){
+  const text=String(header||"").toLowerCase().replace(/[_-]+/g," ");
+  const day=text.search(/\b(?:dd|day)\b/),month=text.search(/\b(?:mm|month)\b/);
+  if(day<0||month<0||day===month)return null;
+  return day<month?"dmy":"mdy";
+}
+
+function inferCSVDateOrder(rows,header,requested){
+  if(["mdy","dmy"].includes(requested))return requested;
+  if(requested&&requested!=="auto")throw new Error("CSV date format must be auto, mdy, or dmy");
+  const headerOrder=dateOrderFromHeader(header),evidence=new Set();
+  let hasAmbiguousNumeric=false;
+  for(const {row} of rows){
+    const parts=yearLastNumericDate(row.date);
+    if(!parts)continue;
+    if(parts.first>12&&parts.second<=12)evidence.add("dmy");
+    else if(parts.second>12&&parts.first<=12)evidence.add("mdy");
+    else if(parts.first<=12&&parts.second<=12)hasAmbiguousNumeric=true;
+  }
+  if(evidence.size>1)throw new Error("The CSV mixes month/day and day/month date formats");
+  const inferred=[...evidence][0]||null;
+  if(headerOrder&&inferred&&headerOrder!==inferred)throw new Error("The date values conflict with the format shown in the CSV date-column header");
+  if(inferred)return inferred;
+  if(headerOrder)return headerOrder;
+  if(hasAmbiguousNumeric)throw new Error("Could not distinguish MM/DD/YYYY from DD/MM/YYYY. Choose the date order explicitly and import again.");
+  return "mdy";
+}
+
+function normalizeCSVDate(value,order){
+  const text=String(value??"").trim();
+  let match=text.match(/^(\d{4})([./-])(\d{1,2})\2(\d{1,2})(?:[ T].*)?$/);
+  if(match)return isoCalendarDate(Number(match[1]),Number(match[3]),Number(match[4]));
+  match=text.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if(match)return isoCalendarDate(Number(match[1]),Number(match[2]),Number(match[3]));
+  const numeric=yearLastNumericDate(text);
+  if(numeric)return order==="dmy"
+    ?isoCalendarDate(numeric.year,numeric.second,numeric.first)
+    :isoCalendarDate(numeric.year,numeric.first,numeric.second);
+  const cleaned=text.toLowerCase().replace(/(\d)(?:st|nd|rd|th)\b/g,"$1").replace(/,/g," ").replace(/\s+/g," ").trim();
+  match=cleaned.match(/^([a-z]+)[ ./-]+(\d{1,2})[ ./-]+(\d{2}|\d{4})$/);
+  if(match&&CSV_MONTHS.has(match[1]))return isoCalendarDate(csvYear(match[3]),CSV_MONTHS.get(match[1]),Number(match[2]));
+  match=cleaned.match(/^(\d{1,2})[ ./-]+([a-z]+)[ ./-]+(\d{2}|\d{4})$/);
+  if(match&&CSV_MONTHS.has(match[2]))return isoCalendarDate(csvYear(match[3]),CSV_MONTHS.get(match[2]),Number(match[1]));
+  return null;
+}
+
+function normalizeCSVImportDates(rows,headers,mapping,requestedFormat){
+  const dateColumn=Number(mapping?.date),header=Number.isInteger(dateColumn)?headers?.[dateColumn]:"";
+  const order=inferCSVDateOrder(rows,header,requestedFormat||"auto");
+  rows.forEach(({row},index)=>{
+    const normalized=normalizeCSVDate(row.date,order);
+    if(!normalized)throw new Error(`Invalid date in CSV row ${index+1}: “${String(row.date||"").trim()}”`);
+    row.date=normalized;
+  });
+  return order;
+}
+
 function transactionDescriptionForDedupe(transaction){
   try{
     const original=JSON.parse(transaction.original_details_json||"{}");
@@ -1914,8 +1998,13 @@ async function api(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/import") {
     const v = await body(req);
-    const importedRows=mappedCSVRows(v);
-    if (!v.account_id || !importedRows) return json(res,{error:"account_id and CSV rows are required"},400);
+    if (!v.account_id) return json(res,{error:"account_id and CSV rows are required"},400);
+    let importedRows,resolvedDateOrder;
+    try{
+      importedRows=mappedCSVRows(v);
+      if(!importedRows)return json(res,{error:"account_id and CSV rows are required"},400);
+      resolvedDateOrder=normalizeCSVImportDates(importedRows,v.csv?.headers,v.column_mapping,v.date_format);
+    }catch(error){return json(res,{error:error.message},400)}
     if(!db.prepare("SELECT id FROM accounts WHERE id=?").get(Number(v.account_id)))return json(res,{error:"Import account not found"},404);
     const aiCategorizationDisabled=v.disable_ai_categorization===true;
     const requestedDedupeFields=Array.isArray(v.deduplication?.fields)?v.deduplication.fields:[];
@@ -1990,7 +2079,7 @@ async function api(req, res, url) {
     } catch(e) { db.exec("ROLLBACK"); throw e; }
     detectTransfers();
     const categorization=await categorizeTransactions({transactionIds:[...new Set(categorizationIds)]});
-    return json(res,{added,replaced,skipped,duplicates_removed:duplicatesRemoved,deduplication:{fields:dedupeFields,keep},categorization});
+    return json(res,{added,replaced,skipped,duplicates_removed:duplicatesRemoved,date_format:{requested:v.date_format||"auto",resolved:resolvedDateOrder},deduplication:{fields:dedupeFields,keep},categorization});
   }
   if (req.method === "POST" && url.pathname === "/api/detect-transfers") {
     return json(res,detectTransfers());

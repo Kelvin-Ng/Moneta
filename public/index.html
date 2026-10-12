@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/import.css">
 </head>
 <body>
   <aside class="sidebar">
@@ -271,6 +272,14 @@
         <section class="csv-config-section">
           <div class="csv-config-heading"><div><strong>Map CSV columns</strong><small>Date, amount, and description are required. Optional mappings improve categorization.</small></div></div>
           <div id="csvColumnMapping" class="csv-mapping-grid"></div>
+          <label class="select-label csv-date-format">Interpret numeric dates
+            <select id="csvDateFormat">
+              <option value="auto">Auto-detect from the full date column</option>
+              <option value="mdy">Month / day / year</option>
+              <option value="dmy">Day / month / year</option>
+            </select>
+            <small>Choose an explicit order when every date could be read both ways.</small>
+          </label>
         </section>
         <section class="csv-config-section">
           <div class="csv-config-heading"><div><strong>Duplicate matching</strong><small>Transactions match when every selected field is equal within this account.</small></div></div>

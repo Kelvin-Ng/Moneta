@@ -1,0 +1,24 @@
+.csv-date-format {
+  margin: 13px 0 0;
+}
+
+.csv-date-format select {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: #414844;
+  padding: 9px;
+  font-size: 10px;
+}
+
+.csv-date-format small {
+  display: block;
+  margin-top: 5px;
+  color: #858c88;
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1.4;
+}
