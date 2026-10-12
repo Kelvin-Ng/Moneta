@@ -1,10 +1,11 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnvFile } from "node:process";
 import { DatabaseSync } from "node:sqlite";
 import { encode as encodeToon } from "@toon-format/toon";
+import { createSyncLock } from "./lib/sync-lock.mjs";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 try { loadEnvFile(join(ROOT, ".env")); } catch (error) {
@@ -17,7 +18,7 @@ const MARKET_DATA_BASE = process.env.MARKET_DATA_BASE_URL || "https://query1.fin
 const PLAID_SYNC_RETRY_MS = Number(process.env.PLAID_SYNC_RETRY_MS || 3000);
 const PLAID_SYNC_MAX_ATTEMPTS = Number(process.env.PLAID_SYNC_MAX_ATTEMPTS || 200);
 const db = new DatabaseSync(process.env.FINANCE_DB_PATH || join(ROOT, "finance.db"));
-db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
+db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
 db.exec(`
   CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY,
@@ -142,6 +143,7 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 `);
+const withPlaidSyncLock=createSyncLock(db);
 function ensureColumn(table, name, definition) {
   if (!db.prepare(`PRAGMA table_info(${table})`).all().some(column => column.name === name))
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
@@ -1173,7 +1175,11 @@ function upsertPlaidTransaction(transaction, investment = false, {preserveClassi
   return db.prepare("SELECT id FROM transactions WHERE external_id=?").get(externalId)?.id||null;
 }
 
-async function syncPlaidItem(itemRowId, {restartTransactions=false,preserveClassification=false,categorize=true,refreshInvestments=true}={}) {
+async function syncPlaidItem(itemRowId,options={}) {
+  return withPlaidSyncLock(itemRowId,()=>syncPlaidItemOnce(itemRowId,options));
+}
+
+async function syncPlaidItemOnce(itemRowId, {restartTransactions=false,preserveClassification=false,categorize=true,refreshInvestments=true}={}) {
   const item = db.prepare("SELECT * FROM plaid_items WHERE id=?").get(itemRowId);
   if (!item) throw new Error("Connected item not found");
   db.prepare("UPDATE plaid_items SET status='syncing',error_code=NULL WHERE id=?").run(item.id);
@@ -1270,26 +1276,70 @@ async function reimportLegacyPlaidItem(itemId) {
 const activePlaidSyncs = new Map();
 const wait = milliseconds => new Promise(resolve=>setTimeout(resolve,milliseconds));
 
+async function syncPlaidItemUntilReady(itemId,{onProgress=()=>{}}={}) {
+  const totals={item_id:itemId,added:0,modified:0,removed:0,investments:0,categorized:0,categorization_failed:0};
+  let started=false,waitingForLock=false;
+  for(let attempt=0;attempt<PLAID_SYNC_MAX_ATTEMPTS;attempt++) {
+    let result;
+    try {
+      result=await syncPlaidItem(itemId,{refreshInvestments:!started});
+      started=true;waitingForLock=false;
+    } catch(error) {
+      if(error.code!=="SYNC_IN_PROGRESS")throw error;
+      waitingForLock=true;
+      onProgress({event:"waiting_for_sync",item_id:itemId,attempt:attempt+1});
+      await wait(PLAID_SYNC_RETRY_MS);
+      continue;
+    }
+    for(const key of ["added","modified","removed","investments"])totals[key]+=result[key]||0;
+    totals.categorized+=result.categorization?.categorized||0;
+    totals.categorization_failed+=result.categorization?.failed||0;
+    if(result.categorization?.stopped)totals.categorization_stopped=true;
+    if(!result.pending)return {...totals,pending:false,transactions_update_status:result.transactions_update_status};
+    onProgress({event:"waiting_for_history",item_id:itemId,attempt:attempt+1});
+    await wait(PLAID_SYNC_RETRY_MS);
+  }
+  const error=new Error(waitingForLock?"Another sync is still running. Try again later."
+    :"Plaid is taking longer than expected to prepare this account. Try syncing again.");
+  error.code=waitingForLock?"SYNC_BUSY_TIMEOUT":"SYNC_TIMEOUT";
+  throw error;
+}
+
+export async function syncAllPlaidItems({onProgress=()=>{}}={}) {
+  const items=db.prepare("SELECT id,institution_name FROM plaid_items ORDER BY id").all();
+  const results=[];
+  for(const item of items) {
+    const context={item_id:item.id,institution:item.institution_name};
+    onProgress({event:"sync_started",...context});
+    try {
+      const result=await syncPlaidItemUntilReady(item.id,{onProgress:progress=>onProgress({...progress,...context})});
+      results.push({...context,...result});
+      onProgress({event:"sync_finished",...context,...result});
+    } catch(error) {
+      if(error.code!=="SYNC_BUSY_TIMEOUT")
+        db.prepare("UPDATE plaid_items SET status='sync_error',error_code=? WHERE id=?").run(error.code||"SYNC_ERROR",item.id);
+      const result={...context,error:true,code:error.code||"SYNC_ERROR"};
+      results.push(result);
+      onProgress({event:"sync_failed",...result});
+    }
+  }
+  return {results,failed:results.filter(result=>result.error||result.categorization_failed||result.categorization_stopped).length};
+}
+
+export function closeDatabase() { db.close(); }
+
 function startPlaidSync(itemId) {
   itemId=Number(itemId);
   if (activePlaidSyncs.has(itemId)) return {item_id:itemId,pending:true,already_running:true};
   if (!db.prepare("SELECT id FROM plaid_items WHERE id=?").get(itemId)) throw new Error("Connected item not found");
   db.prepare("UPDATE plaid_items SET status='syncing',error_code=NULL WHERE id=?").run(itemId);
   const job=(async()=>{
-    const totals={item_id:itemId,added:0,modified:0,removed:0,investments:0};
     try {
-      for(let attempt=0;attempt<PLAID_SYNC_MAX_ATTEMPTS;attempt++){
-        const result=await syncPlaidItem(itemId,{refreshInvestments:attempt===0});
-        for(const key of ["added","modified","removed","investments"])totals[key]+=result[key]||0;
-        if(!result.pending)return {...totals,pending:false,transactions_update_status:result.transactions_update_status};
-        await wait(PLAID_SYNC_RETRY_MS);
-      }
-      const error=new Error("Plaid is taking longer than expected to prepare this account. Try syncing again.");
-      error.code="SYNC_TIMEOUT";
-      throw error;
+      return await syncPlaidItemUntilReady(itemId);
     }catch(error){
+      if(error.code==="SYNC_BUSY_TIMEOUT")return {item_id:itemId,pending:true,already_running:true};
       db.prepare("UPDATE plaid_items SET status='sync_error',error_code=? WHERE id=?").run(error.code||"SYNC_ERROR",itemId);
-      return {...totals,pending:false,error:error.message,code:error.code||"SYNC_ERROR"};
+      return {item_id:itemId,pending:false,error:error.message,code:error.code||"SYNC_ERROR"};
     }finally{activePlaidSyncs.delete(itemId)}
   })();
   activePlaidSyncs.set(itemId,job);
@@ -1939,6 +1989,7 @@ async function api(req, res, url) {
     let sync;
     try { sync=await syncPlaidItem(item.id); }
     catch (error) {
+      if(error.code==="SYNC_IN_PROGRESS")return json(res,{item_id:item.id,accounts:accounts.accounts.length,sync:{pending:true,already_running:true}},202);
       db.prepare("UPDATE plaid_items SET status='sync_error',error_code=? WHERE id=?").run(error.code||"SYNC_ERROR",item.id);
       if (error.code !== "PRODUCT_NOT_READY") throw error;
       sync={added:0,modified:0,removed:0,investments:0,pending:true};
@@ -1958,11 +2009,15 @@ async function api(req, res, url) {
     for (const item of items) {
       try { results.push({item_id:item.id,...await syncPlaidItem(item.id)}); }
       catch (error) {
+        if(error.code==="SYNC_IN_PROGRESS"){
+          results.push({item_id:item.id,pending:true,already_running:true});
+          continue;
+        }
         db.prepare("UPDATE plaid_items SET status='sync_error',error_code=? WHERE id=?").run(error.code||"SYNC_ERROR",item.id);
         results.push({item_id:item.id,error:error.message,code:error.code});
       }
     }
-    return json(res,{results},results.some(result=>result.error)?207:200);
+    return json(res,{results},results.some(result=>result.error)?207:results.some(result=>result.pending)?202:200);
   }
   if (req.method === "POST" && url.pathname === "/api/plaid/reimport-legacy") {
     const value=await body(req);
@@ -1975,6 +2030,10 @@ async function api(req, res, url) {
     for(const item of items){
       try{results.push({item_id:item.id,...await reimportLegacyPlaidItem(item.id)})}
       catch(error){
+        if(error.code==="SYNC_IN_PROGRESS"){
+          results.push({item_id:item.id,pending:true,already_running:true});
+          continue;
+        }
         db.prepare("UPDATE plaid_items SET status='sync_error',error_code=? WHERE id=?").run(error.code||"SYNC_ERROR",item.id);
         results.push({item_id:item.id,error:error.message,code:error.code||"SYNC_ERROR"});
       }
@@ -2156,6 +2215,7 @@ function detectTransfers() {
 }
 
 const mime={".html":"text/html; charset=utf-8",".css":"text/css; charset=utf-8",".js":"text/javascript; charset=utf-8",".svg":"image/svg+xml"};
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
 createServer(async(req,res)=>{
   try {
     const url=new URL(req.url,`http://${req.headers.host}`);
@@ -2176,3 +2236,4 @@ createServer(async(req,res)=>{
     console.error(e); json(res,{error:e.message||"Server error"},500);
   }
 }).listen(PORT,HOST,()=>console.log(`Moneta is running at http://localhost:${PORT}`));
+}

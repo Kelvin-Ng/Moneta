@@ -8,6 +8,7 @@ database and can import financial data through Plaid or CSV.
 
 - Unified activity classified by category group: Income, Transfers, or expenses
 - Plaid connections for supported banks, cards, and brokerages, including on-demand investment refreshes
+- Standalone account sync and optional daily scheduling, independent of the web server
 - Optional account nicknames shown throughout reports, filters, and transaction lists
 - Credit-card payment matching so transfers are not counted as duplicate expenses
 - Monarch-style category groups and categories
@@ -101,6 +102,54 @@ Complete the institution's Plaid Link flow; Moneta keeps the existing Plaid Item
 accounts, nicknames, and transaction history, then starts a background sync
 automatically. OAuth re-authentication uses the configured redirect URI and can
 resume after the browser returns to Moneta.
+
+### Unattended sync
+
+Sync every saved Plaid connection without opening the website:
+
+```bash
+npm run sync
+```
+
+The command uses the same database, Plaid settings, transaction cursors,
+investment refreshes, transfer matching, and optional AI categorization as the
+website. It works whether the web server is running or stopped and can be run
+from any directory with `node /absolute/path/to/Moneta/scripts/sync.mjs`.
+Per-connection database locks prevent simultaneous jobs from importing from the
+same cursor; locks left by terminated processes are recovered automatically.
+Incomplete initial history is retried, and a failed connection does not prevent
+the remaining connections from syncing. The command prints timestamped JSON
+progress and exits nonzero for sync or categorization failures. Connections that
+need renewed login or consent still require **Re-authenticate** in the website.
+
+On Linux with systemd, install a daily user timer:
+
+```bash
+npm run sync:schedule
+```
+
+The default schedule is **9:00 PM America/Los_Angeles**, following Pacific
+daylight-saving changes. `Persistent=true` runs a missed job when the user
+scheduler next becomes available; the machine does not need the web server
+running. To change the schedule, run the installer again with, for example,
+`npm run sync:schedule -- --time=08:00 --timezone=America/New_York`.
+
+```bash
+systemctl --user list-timers moneta-sync.timer
+journalctl --user -u moneta-sync.service
+systemctl --user start moneta-sync.service       # Run now
+systemctl --user disable --now moneta-sync.timer # Stop daily scheduling
+```
+
+To keep the user scheduler running while logged out, enable lingering with
+`loginctl enable-linger "$USER"` (administrator approval may be required).
+The timer's program and project paths are captured at installation; rerun the
+installer if you move the project or change the Node.js installation. Scheduled
+sync reads `.env` beside `server.mjs`, just like the server. Put a custom
+`FINANCE_DB_PATH` there so unattended runs use the intended database.
+
+For cron or another scheduler, invoke the absolute Node.js and script paths.
+Scheduling requires the machine to be on and network access to be available.
 
 ## Configure AI categorization
 

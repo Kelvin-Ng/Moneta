@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "node --watch server.mjs",
     "start": "node server.mjs",
+    "sync": "node scripts/sync.mjs",
+    "sync:schedule": "node scripts/install-sync-timer.mjs",
     "test": "node --test"
   },
   "engines": {
