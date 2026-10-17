@@ -21,7 +21,7 @@ function child(args,env,cwd=root) {
     process.once("error",reject);
     process.once("close",code=>resolve({code,stdout,stderr}));
   });
-  return {process,finished,output:()=>stdout};
+  return {process,finished,output:()=>stdout,errorOutput:()=>stderr};
 }
 async function until(predicate) {
   for(let attempt=0;attempt<200;attempt++) {
@@ -103,7 +103,7 @@ test("standalone and website syncs safely share a database while the server is r
   await new Promise(resolve=>portServer.listen(0,"127.0.0.1",resolve));
   f.env.PORT=String(portServer.address().port);
   await new Promise(resolve=>portServer.close(resolve));
-  f.launch([join(root,"server.mjs")]);
+  const webServer=f.launch([join(root,"server.mjs")]);
   const base=`http://127.0.0.1:${f.env.PORT}`;
   await until(async()=>{try{return (await fetch(`${base}/api/plaid/status`)).ok}catch{return false}});
 
@@ -114,8 +114,14 @@ test("standalone and website syncs safely share a database while the server is r
   await entered;
   const cli=f.launch([join(root,"scripts/sync.mjs")],f.directory);
   await until(()=>cli.output().includes("waiting_for_sync"));
+  // A different process may briefly write to SQLite while Plaid is replying.
+  // The page import must wait for that writer rather than fail mid-transaction.
+  f.db.exec("BEGIN IMMEDIATE");
+  const writerReleased=new Promise(resolve=>setTimeout(()=>{f.db.exec("COMMIT");resolve();},50));
   release();
-  assert.equal((await web).status,200);
+  await writerReleased;
+  const webResponse=await web;
+  assert.equal(webResponse.status,200,JSON.stringify(await webResponse.json())+webServer.errorOutput());
   const result=await cli.finished;
   assert.equal(result.code,0,result.stderr);
   assert.doesNotMatch(result.stdout,/Moneta is running/);

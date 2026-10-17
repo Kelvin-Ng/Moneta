@@ -1205,7 +1205,9 @@ async function syncPlaidItemOnce(itemRowId, {restartTransactions=false,preserveC
         options:{include_original_description:true,personal_finance_category_version:"v2"}
       });
       transactionsUpdateStatus = data.transactions_update_status || transactionsUpdateStatus;
-      db.exec("BEGIN");
+      // Acquire the write lock before upsert lookups, so another process cannot
+      // make a deferred read-to-write upgrade fail with SQLITE_BUSY.
+      db.exec("BEGIN IMMEDIATE");
       try {
         data.added.forEach(transaction => { const id=upsertPlaidTransaction(transaction,false,{preserveClassification});if(id)categorizationIds.push(id);added++; });
         data.modified.forEach(transaction => { const id=upsertPlaidTransaction(transaction,false,{preserveClassification});if(id)categorizationIds.push(id);modified++; });
