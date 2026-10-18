@@ -278,6 +278,83 @@ test("category groups classify transactions and positive expenses reduce totals"
   await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
 });
 
+test("AI evidence carries category confidence and card-repayment guidance across providers",async()=>{
+  const database=new DatabaseSync(join(temp,"test.db"));
+  const accountId=Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES(?,?,?)")
+    .run("Evidence Test","Synthetic Checking","checking").lastInsertRowid);
+  const originals=[
+    {source:"plaid",investment:false,transaction:{name:"Example Card-Pmt Withdrawal DDA_TRANSACTION",
+      amount:425.5,account_id:"private-account-id",transaction_id:"private-transaction-id",
+      personal_finance_category:{primary:"RENT_AND_UTILITIES",detailed:"RENT_AND_UTILITIES_RENT",confidence_level:"LOW"}}},
+    {source:"manual",submitted:{merchant:"Monthly rent via Example BillPay",amount:-2500,category:"Rent"}}
+  ];
+  try {
+    const ids=originals.map((original,index)=>Number(database.prepare(`INSERT INTO transactions(
+      account_id,date,merchant,category,amount,original_details_json,category_source,categorization_status
+    ) VALUES(?,?,?,?,?,?,'fallback','pending')`).run(accountId,"2026-08-15",
+      original.transaction?.name||original.submitted.merchant,"Rent",index===0?-425.5:-2500,JSON.stringify(original)).lastInsertRowid));
+    for(const adapter of [
+      {protocol:"openai-compatible",endpoint:`http://127.0.0.1:${plaidPort}/v1/chat/completions`,model:"mock-chat"},
+      {protocol:"openai-responses",endpoint:`http://127.0.0.1:${plaidPort}/v1/responses`,model:"mock-responses"},
+      {protocol:"anthropic",endpoint:`http://127.0.0.1:${plaidPort}/v1/messages`,model:"mock-anthropic"},
+      {protocol:"gemini",endpoint:`http://127.0.0.1:${plaidPort}/v1beta`,model:"mock-gemini"}
+    ]){
+      const settings=await fetch(`http://localhost:${port}/api/settings/ai`,{
+        method:"PUT",headers:{"content-type":"application/json"},
+        body:JSON.stringify({...adapter,api_key:"mock-key",rules:"Respect explicit transaction purposes."})
+      });
+      assert.equal(settings.status,200);
+      aiRequests=[];
+      const run=await fetch(`http://localhost:${port}/api/categorization/run`,{
+        method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:ids})
+      });
+      assert.equal(run.status,200);
+      assert.equal((await run.json()).categorized,2);
+      assert.equal(aiRequests.length,1);
+      const request=aiRequests[0].payload;
+      const system=adapter.protocol==="anthropic"?request.system
+        :adapter.protocol==="gemini"?request.systemInstruction.parts[0].text
+        :adapter.protocol==="openai-responses"?request.instructions:request.messages[0].content;
+      const user=adapter.protocol==="openai-responses"?request.input
+        :adapter.protocol==="gemini"?request.contents.at(-1).parts.at(-1).text:request.messages.at(-1).content;
+      assert.match(system,/LOW, UNKNOWN, or missing confidence/);
+      assert.match(system,/Prioritize explicit card-payment wording/);
+      assert.match(system,/Card-Pmt/);
+      assert.match(system,/Repaying a credit-card balance is Credit Card Payment, not Rent/);
+      assert.match(system,/an actual rent payment through a bill-pay service is still Rent/);
+      const evidence=decodeToon(user).transactions;
+      assert.equal(evidence[0].description,originals[0].transaction.name);
+      assert.equal(evidence[0].source_category_detail,"RENT_AND_UTILITIES_RENT");
+      assert.equal(evidence[0].source_category_confidence,"LOW");
+      assert.equal(evidence[1].source_category_confidence,null);
+      assert.doesNotMatch(user,/private-account-id|private-transaction-id|confidence_level/);
+      assert.ok(evidence.every(row=>!Object.hasOwn(row,"original_details")&&!Object.hasOwn(row,"date")));
+    }
+
+    // The same optional evidence can be mapped from arbitrary CSV headers.
+    aiRequests=[];
+    const imported=await fetch(`http://localhost:${port}/api/import`,{
+      method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
+        account_id:accountId,csv:{headers:["When","Details","Value","Source Bucket","Certainty"],
+          rows:[["2026-08-16","Synthetic purchase","-12.34","OTHER_OTHER","medium"]]},
+        column_mapping:{date:0,description:1,amount:2,category:3,source_category_confidence:4}
+      })
+    });
+    assert.equal(imported.status,200);
+    assert.equal((await imported.json()).categorization.categorized,1);
+    assert.equal(decodeToon(aiRequests[0].payload.contents.at(-1).parts.at(-1).text).transactions[0].source_category_confidence,"MEDIUM");
+    const saved=database.prepare("SELECT original_details_json FROM transactions WHERE id IN (?,?) ORDER BY id").all(...ids);
+    assert.deepEqual(saved.map(row=>JSON.parse(row.original_details_json)),originals);
+  } finally {
+    await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
+    await fetch(`http://localhost:${port}/api/settings/ai`,{
+      method:"PUT",headers:{"content-type":"application/json"},
+      body:JSON.stringify({protocol:"openai-compatible",endpoint:"",model:"",rules:"",clear_api_key:true})
+    });
+    database.close();
+  }
+});
+
 test("CSV import works without a category and keeps explicit Moneta categories",async()=>{
   const accountResponse=await fetch(`http://localhost:${port}/api/accounts`,{
     method:"POST",headers:{"content-type":"application/json"},
@@ -865,6 +942,7 @@ test("AI categorization stores original details and batches transactions through
   assert.equal("date" in sent[0],false);
   assert.equal("original_details" in sent[0],false);
   assert.equal("institution" in sent[0],false);
+  assert.equal("source_category_confidence" in sent[0],false);
 
   const transactions=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions;
   assert.equal(transactions.find(transaction=>transaction.id===ids[0]).category,"Paychecks");
@@ -877,6 +955,7 @@ test("AI categorization stores original details and batches transactions through
     method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({account_id:accountId,rows:[{
       date:"2026-08-14",amount:-32,description:"P2P PAYMENT",memo:"Lunch with coworkers",
       source_category:"TRANSFER_OUT",source_category_detail:"TRANSFER_OUT_ACCOUNT_TRANSFER",
+      source_category_confidence:"low",
       transaction_code:"DDA_TRANSACTION",payment_channel:"online",external_id:"csv-ai-evidence"
     }]})
   });
@@ -890,6 +969,7 @@ test("AI categorization stores original details and batches transactions through
   assert.equal(csvEvidence.memo,"Lunch with coworkers");
   assert.equal(csvEvidence.source_category,"TRANSFER_OUT");
   assert.equal(csvEvidence.source_category_detail,"TRANSFER_OUT_ACCOUNT_TRANSFER");
+  assert.equal(csvEvidence.source_category_confidence,"LOW");
   assert.equal(csvEvidence.transaction_code,"DDA_TRANSACTION");
   assert.equal(csvEvidence.account_type,"cash");
   assert.equal("date" in csvEvidence,false);

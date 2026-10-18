@@ -204,7 +204,11 @@ transaction is stored locally for future re-categorization. It is not sent to
 the AI provider. Moneta extracts a compact, shared evidence record containing
 the signed amount, description, and account type plus useful fields that are
 actually available, such as merchant, memo, counterparty, source categories,
-transaction code, and investment facts. Batches are serialized as TOON to avoid
+source-category confidence, transaction code, and investment facts. Source
+categories are hints: the prompt treats low or unknown confidence as weak
+evidence and prioritizes explicit card-repayment wording over conflicting
+spending categories. Card branding alone does not turn an actual rent payment
+into a credit-card payment. Batches are serialized as TOON to avoid
 repeating field names; provider responses remain schema-validated JSON.
 
 Older transactions are backfilled with the details already present in Moneta,
@@ -283,7 +287,8 @@ date,amount,description,merchant,memo,source_category,source_category_detail,tra
 ```
 
 Optional categorization evidence columns are `merchant`, `memo` or `note`,
-`counterparty`, `source_category`, `source_category_detail`, `transaction_code`,
+`counterparty`, `source_category`, `source_category_detail`,
+`source_category_confidence`, `transaction_code`,
 `investment_action`, `investment_subtype`, `security_name`, `ticker`, `quantity`,
 `price`, and `fees`. Empty optional fields are not sent to the AI provider.
 

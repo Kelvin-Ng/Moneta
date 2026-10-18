@@ -16,6 +16,7 @@ const csvMappingFields=[
   {key:"moneta_category",label:"Moneta category",aliases:["moneta category","moneta_category"]},
   {key:"category",label:"Source category",aliases:["category","source category","source_category"]},
   {key:"source_category_detail",label:"Source category detail",aliases:["source category detail","source_category_detail","category detail","category_detail"]},
+  {key:"source_category_confidence",label:"Source category confidence",aliases:["source category confidence","source_category_confidence","category confidence","category_confidence","confidence level"]},
   {key:"memo",label:"Memo / note",aliases:["memo","note","notes"]},
   {key:"counterparty",label:"Counterparty",aliases:["counterparty","counter party"]},
   {key:"transaction_code",label:"Transaction code",aliases:["transaction code","transaction_code","type"]},
