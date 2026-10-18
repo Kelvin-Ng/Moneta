@@ -278,7 +278,7 @@ test("category groups classify transactions and positive expenses reduce totals"
   await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
 });
 
-test("AI evidence carries category confidence and card-repayment guidance across providers",async()=>{
+test("AI evidence carries confidence and distinguishes card repayments, app funding, and actual payments across providers",async()=>{
   const database=new DatabaseSync(join(temp,"test.db"));
   const accountId=Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES(?,?,?)")
     .run("Evidence Test","Synthetic Checking","checking").lastInsertRowid);
@@ -286,13 +286,19 @@ test("AI evidence carries category confidence and card-repayment guidance across
     {source:"plaid",investment:false,transaction:{name:"Example Card-Pmt Withdrawal DDA_TRANSACTION",
       amount:425.5,account_id:"private-account-id",transaction_id:"private-transaction-id",
       personal_finance_category:{primary:"RENT_AND_UTILITIES",detailed:"RENT_AND_UTILITIES_RENT",confidence_level:"LOW"}}},
-    {source:"manual",submitted:{merchant:"Monthly rent via Example BillPay",amount:-2500,category:"Rent"}}
+    {source:"manual",submitted:{merchant:"Monthly rent via Example BillPay",amount:-2500,category:"Rent"}},
+    {source:"plaid",investment:false,transaction:{name:"Venmo",original_description:"Venmo - Payment Withdrawal WITHDRAWAL",
+      amount:42.5,personal_finance_category:{primary:"TRANSFER_OUT",detailed:"TRANSFER_OUT_TRANSFER_OUT_FROM_APPS",confidence_level:"HIGH"},
+      payment_meta:{reason:null},counterparties:[{name:"Venmo"}]}},
+    {source:"plaid",investment:false,transaction:{name:'Example Friend "Dinner"',amount:42.5,
+      personal_finance_category:{primary:"TRANSFER_OUT",detailed:"TRANSFER_OUT_TRANSFER_OUT_FROM_APPS",confidence_level:"HIGH"},
+      payment_meta:{reason:"Dinner"},counterparties:[{name:"Example Friend"}]}}
   ];
   try {
-    const ids=originals.map((original,index)=>Number(database.prepare(`INSERT INTO transactions(
+    const ids=originals.map(original=>Number(database.prepare(`INSERT INTO transactions(
       account_id,date,merchant,category,amount,original_details_json,category_source,categorization_status
     ) VALUES(?,?,?,?,?,?,'fallback','pending')`).run(accountId,"2026-08-15",
-      original.transaction?.name||original.submitted.merchant,"Rent",index===0?-425.5:-2500,JSON.stringify(original)).lastInsertRowid));
+      original.transaction?.name||original.submitted.merchant,"Rent",original.transaction?-original.transaction.amount:original.submitted.amount,JSON.stringify(original)).lastInsertRowid));
     for(const adapter of [
       {protocol:"openai-compatible",endpoint:`http://127.0.0.1:${plaidPort}/v1/chat/completions`,model:"mock-chat"},
       {protocol:"openai-responses",endpoint:`http://127.0.0.1:${plaidPort}/v1/responses`,model:"mock-responses"},
@@ -309,7 +315,7 @@ test("AI evidence carries category confidence and card-repayment guidance across
         method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:ids})
       });
       assert.equal(run.status,200);
-      assert.equal((await run.json()).categorized,2);
+      assert.equal((await run.json()).categorized,originals.length);
       assert.equal(aiRequests.length,1);
       const request=aiRequests[0].payload;
       const system=adapter.protocol==="anthropic"?request.system
@@ -322,13 +328,26 @@ test("AI evidence carries category confidence and card-repayment guidance across
       assert.match(system,/Card-Pmt/);
       assert.match(system,/Repaying a credit-card balance is Credit Card Payment, not Rent/);
       assert.match(system,/an actual rent payment through a bill-pay service is still Rent/);
+      assert.match(system,/Distinguish actual peer-to-peer payments recorded in a payment-app account from the source bank's funding or settlement entries/);
+      assert.match(system,/For an actual payment recorded in a Venmo or PayPal account, infer its purpose/);
+      assert.match(system,/bank entries that fund or settle activity in the user's payment-app account are Transfer/);
+      assert.match(system,/counting both as expenses would double-count spending/);
+      assert.match(system,/Venmo-Payment-\.\.\. Withdrawal DDA_TRANSACTION/);
+      assert.match(system,/should remain Transfer/);
+      assert.match(system,/Do not invent a spending purpose or choose Fun Money/);
+      assert.doesNotMatch(system,/Peer-to-peer payments such as Venmo or PayPal are not automatically transfers/);
       const evidence=decodeToon(user).transactions;
       assert.equal(evidence[0].description,originals[0].transaction.name);
       assert.equal(evidence[0].source_category_detail,"RENT_AND_UTILITIES_RENT");
       assert.equal(evidence[0].source_category_confidence,"LOW");
       assert.equal(evidence[1].source_category_confidence,null);
+      assert.equal(evidence[2].description,originals[2].transaction.original_description);
+      assert.equal(evidence[2].counterparty,"Venmo");
+      assert.equal(evidence[2].memo,null);
+      assert.equal(evidence[3].memo,"Dinner");
+      assert.equal(evidence[3].counterparty,"Example Friend");
       assert.doesNotMatch(user,/private-account-id|private-transaction-id|confidence_level/);
-      assert.ok(evidence.every(row=>!Object.hasOwn(row,"original_details")&&!Object.hasOwn(row,"date")));
+      assert.ok(evidence.every(row=>["original_details","date","institution","account_name","matching_transaction","related_transactions"].every(field=>!Object.hasOwn(row,field))));
     }
 
     // The same optional evidence can be mapped from arbitrary CSV headers.
@@ -343,7 +362,7 @@ test("AI evidence carries category confidence and card-repayment guidance across
     assert.equal(imported.status,200);
     assert.equal((await imported.json()).categorization.categorized,1);
     assert.equal(decodeToon(aiRequests[0].payload.contents.at(-1).parts.at(-1).text).transactions[0].source_category_confidence,"MEDIUM");
-    const saved=database.prepare("SELECT original_details_json FROM transactions WHERE id IN (?,?) ORDER BY id").all(...ids);
+    const saved=database.prepare(`SELECT original_details_json FROM transactions WHERE id IN (${ids.map(()=>"?").join(",")}) ORDER BY id`).all(...ids);
     assert.deepEqual(saved.map(row=>JSON.parse(row.original_details_json)),originals);
   } finally {
     await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});

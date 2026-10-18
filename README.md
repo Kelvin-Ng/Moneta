@@ -181,7 +181,7 @@ Natural-language rules can be added in the same form. For example:
 
 ```text
 Transactions from Acme Payroll are Paychecks.
-Peer-to-peer payment memos mentioning lunch or dinner are Restaurants & Bars.
+Payments recorded in a peer-to-peer account with lunch or dinner memos are Restaurants & Bars; source-bank funding entries are Transfer.
 ```
 
 New uncategorized transactions retain a deterministic fallback category until
