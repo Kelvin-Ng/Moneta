@@ -719,6 +719,92 @@ test("net worth requires complete coverage only for the latest historical date",
   await fetch(`http://localhost:${port}/api/accounts/${noHistoryId}`,{method:"DELETE"});
 });
 
+test("paycheck reporting persists roles, projects before filtering, and leaves stored data intact",async()=>{
+  const database=new DatabaseSync(join(temp,"test.db"));
+  database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000");
+  const accountIds=[],transactionIds=[];
+  const settingsUrl=`http://localhost:${port}/api/settings/paycheck-reporting`;
+  const save=async value=>fetch(settingsUrl,{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify(value)});
+  const beforeSettings=await (await fetch(`http://localhost:${port}/api/settings`)).json();
+  let viewId;
+  try{
+    for(const [name,type] of [["Payroll bank","checking"],["Parent plan","investment"],["BrokerageLink","investment"],["Self-funded IRA","investment"]]){
+      accountIds.push(Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES('Test',?,?)").run(name,type).lastInsertRowid));
+    }
+    const [bank,plan,brokerage,ira]=accountIds;
+    const insert=(accountId,amount,category,details,merchant="Payroll test")=>{
+      const result=database.prepare(`INSERT INTO transactions(account_id,date,merchant,amount,category,original_details_json,ai_categorization_disabled)
+        VALUES(?,'2026-09-10',?,?,?,?,1)`).run(accountId,merchant,amount,category,JSON.stringify(details));
+      const id=Number(result.lastInsertRowid);transactionIds.push(id);return id;
+    };
+    insert(bank,5500,"Paychecks",{source:"manual"});
+    const contributionId=insert(plan,2000,"Transfer",{source:"plaid",investment:true,transaction:{type:"cash",subtype:"contribution"}});
+    insert(plan,0,"Transfer",{source:"plaid",investment:true,transaction:{type:"cash",subtype:"withdrawal"}});
+    insert(brokerage,2000,"Paychecks",{source:"plaid",investment:true,transaction:{type:"cash",subtype:"deposit"}});
+    insert(brokerage,-2000,"Miscellaneous",{source:"csv",row:{investment_action:"buy",investment_subtype:"buy"}});
+    insert(ira,7000,"Transfer",{source:"plaid",investment:true,transaction:{type:"cash",subtype:"contribution"}});
+    insert(plan,-100,"Transfer",{source:"csv",row:{investment_action:"cash",investment_subtype:"contribution"}},"Contribution correction");
+    // Test ledger metadata too, without relying on the original source payload.
+    const ledgerId=insert(plan,500,"Transfer",{});
+    database.prepare("UPDATE transactions SET external_id='test-payroll-ledger' WHERE id=?").run(ledgerId);
+    database.prepare(`INSERT INTO investment_ledger(external_id,account_id,date,name,amount,type,subtype)
+      VALUES('test-payroll-ledger',?,'2026-09-10','Contribution',-500,'cash','contribution')`).run(plan);
+    const snapshot=database.prepare("SELECT * FROM transactions WHERE id>=? AND id<=? ORDER BY id").all(transactionIds[0],transactionIds.at(-1));
+
+    assert.equal((await save({paycheck_mode:"unknown"})).status,400);
+    assert.equal((await save({contribution_account_ids:[bank]})).status,400);
+    assert.equal((await save({plan_account_ids:"invalid"})).status,400);
+    const saved=await save({paycheck_mode:"full-paycheck",contribution_account_ids:[plan],plan_account_ids:[brokerage]});
+    assert.equal(saved.status,200);
+    const configuration=(await saved.json()).paycheck_reporting;
+    assert.deepEqual(configuration.contribution_account_ids,[plan]);
+    assert.ok(configuration.plan_account_ids.includes(plan));
+    assert.equal(configuration.accounts.find(account=>account.id===plan).contribution_count,3);
+    assert.equal(configuration.accounts.find(account=>account.id===plan).contribution_amount,2400);
+
+    const params=new URLSearchParams({from:"2026-09-01",to:"2026-09-30",accounts:accountIds.join(",")});
+    const report=await (await fetch(`http://localhost:${port}/api/transactions?${params}`)).json();
+    assert.equal(report.reporting.mode,"full-paycheck");
+    assert.equal(report.summary.totals.income,7900);
+    assert.equal(report.summary.totals.expense,0);
+    assert.equal(report.reporting.contribution_count,3);
+    assert.equal(report.reporting.contribution_amount,2400);
+    assert.equal(report.transactions.find(row=>row.id===contributionId).category,"Transfer");
+    assert.equal(report.report_transactions.find(row=>row.id===contributionId).category,"Paychecks");
+    assert.equal(report.report_transactions.some(row=>"original_details_json" in row),false);
+    assert.equal(report.summary.months[0].income,7900);
+
+    params.set("categories","Paychecks");params.set("search","paychecks");
+    const filtered=await (await fetch(`http://localhost:${port}/api/transactions?${params}`)).json();
+    assert.equal(filtered.summary.totals.income,7900);
+    assert.equal(filtered.report_transactions.length,4);
+    params.delete("search");params.delete("categories");params.set("accounts",String(brokerage));
+    const withinPlan=await (await fetch(`http://localhost:${port}/api/transactions?${params}`)).json();
+    assert.equal(withinPlan.summary.totals.income,0);
+    assert.equal(withinPlan.summary.totals.expense,0);
+    params.set("accounts",accountIds.join(","));params.set("paycheck_mode","take-home");
+    const takeHome=await (await fetch(`http://localhost:${port}/api/bootstrap?${params}`)).json();
+    assert.equal(takeHome.reporting.mode,"take-home");
+    assert.equal(takeHome.summary.totals.income,7500); // Original categories, no projection.
+    assert.equal(takeHome.report_transactions.find(row=>row.id===contributionId).category,"Transfer");
+
+    const view=await (await fetch(`http://localhost:${port}/api/views`,{method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({name:"Full-paycheck test",configuration:{paycheck_mode:"full-paycheck",filters:{range:"all"}}})})).json();
+    viewId=view.id;
+    assert.equal((await (await fetch(`http://localhost:${port}/api/views/${viewId}`)).json()).configuration.paycheck_mode,"full-paycheck");
+    assert.deepEqual(database.prepare("SELECT * FROM transactions WHERE id>=? AND id<=? ORDER BY id").all(transactionIds[0],transactionIds.at(-1)),snapshot);
+    assert.equal((await fetch(`http://localhost:${port}/api/accounts/${brokerage}`,{method:"DELETE"})).status,200);
+    const afterDelete=(await (await fetch(`http://localhost:${port}/api/settings`)).json()).paycheck_reporting;
+    assert.equal(afterDelete.plan_account_ids.includes(brokerage),false);
+    assert.deepEqual(afterDelete.contribution_account_ids,[plan]);
+  }finally{
+    await save(beforeSettings.paycheck_reporting);
+    if(viewId)await fetch(`http://localhost:${port}/api/views/${viewId}`,{method:"DELETE"});
+    for(const id of accountIds)database.prepare("DELETE FROM accounts WHERE id=?").run(id);
+    database.close();
+  }
+});
+
 test("report views persist configuration without calculated values",async()=>{
   const configuration={version:1,filters:{range:"custom",from:"2026-06-01",to:"2026-06-30",accounts:[1],categories:["Groceries"],search:"market"}};
   const create=await fetch(`http://localhost:${port}/api/views`,{

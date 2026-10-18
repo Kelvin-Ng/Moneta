@@ -37,7 +37,7 @@ function client() {
   runInContext(source.slice(0,initialization)+`
     globalThis.app={state,bind,renderCashFlow,selectCashFlowMonth,selectSankeyNode,
       cashFlowTransactions,cashFlowData,showCashFlowBarTooltip,setRange,
-      currentReportConfiguration,applyReportConfiguration,reportSettingsSummary,queryString,
+      currentReportConfiguration,applyReportConfiguration,applyDefaultReportConfiguration,renderPaycheckReporting,reportSettingsSummary,queryString,
       barData:()=>cashFlowBarChartState?.data};
   `,context);
   const app=context.app;
@@ -98,6 +98,56 @@ test("clicking a month filters cash-flow totals, Sankey, and details while retai
   assert.equal(app.state.summary,originalSummary);
   assert.equal(app.state.filters.from,"2025-01-01");
   assert.equal(app.state.filters.to,"2026-10-31");
+});
+
+test("full-paycheck charts and drill-down use report rows without changing the transaction ledger",()=>{
+  const {app,element,clickMonth}=client();
+  const original=app.state.transactions;
+  app.state.paycheckMode="full-paycheck";
+  app.state.reporting={contribution_account_ids:[1],contribution_amount:500};
+  app.state.reportTransactions=[...original,{
+    id:99,date:"2026-09-05",merchant:"Payroll retirement contribution",amount:500,
+    account_name:"Parent retirement plan",category:"Paychecks",category_group:"Income",
+    original_category:"Transfer",report_adjustment:"payroll_contribution"
+  }];
+  app.state.summary=JSON.parse(JSON.stringify(app.state.summary));
+  app.state.summary.totals.income+=500;
+  app.state.summary.months.find(row=>row.month==="2026-09").income+=500;
+  app.renderPaycheckReporting();app.renderCashFlow();clickMonth("2026-09");
+  assert.equal(element("#cashflowIncome").textContent,"$2,500.00");
+  assert.equal(element("#cashflowNet").textContent,"$2,000.00");
+  assert.equal(element("#cashflowRate").textContent,"80.0%");
+  assert.match(element("#cashflowSankey").innerHTML,/Available cash · \$2,500.00/);
+  assert.match(element("#cashflowMonthDetailsRows").innerHTML,/Payroll retirement contribution/);
+  app.selectSankeyNode({dataset:{sankeyScope:"category",sankeyName:"Paychecks",sankeyGroup:"Income",sankeySide:"income"}});
+  assert.match(element("#sankeyDetailsSummary").textContent,/2 transactions · \$2,500.00/);
+  assert.match(element("#sankeyDetailsRows").innerHTML,/Payroll retirement contribution/);
+  assert.equal(app.state.transactions,original);
+  assert.equal(app.queryString().get("paycheck_mode"),"full-paycheck");
+  assert.equal(element("#paycheckMode").value,"full-paycheck");
+  assert.equal(element("#paycheckReportingNote").hidden,false);
+  assert.match(element("#paycheckReportingNote").innerHTML,/\$500.00/);
+});
+
+test("saved views remember paycheck mode, while leaving a view restores the persisted default",()=>{
+  const {app,element}=client();
+  app.state.paycheckMode="full-paycheck";
+  const configuration=app.currentReportConfiguration();
+  assert.equal(configuration.paycheck_mode,"full-paycheck");
+  app.state.paycheckMode="take-home";
+  app.applyReportConfiguration(configuration,{rebuild:false});
+  assert.equal(app.state.paycheckMode,"full-paycheck");
+  app.reportSettingsSummary();
+  assert.match(element("#reportSettingsSummary").innerHTML,/Full paycheck/);
+  app.state.defaultPaycheckMode="take-home";app.applyDefaultReportConfiguration();
+  assert.equal(app.state.paycheckMode,"take-home");
+  app.state.defaultPaycheckMode="full-paycheck";app.applyDefaultReportConfiguration();
+  assert.equal(app.state.paycheckMode,"full-paycheck");
+  app.applyReportConfiguration({filters:{range:"all"}},{rebuild:false});
+  assert.equal(app.state.paycheckMode,"take-home");
+  app.renderPaycheckReporting();assert.equal(element("#paycheckReportingNote").hidden,true);
+  app.state.paycheckMode="full-paycheck";app.state.reporting={contribution_account_ids:[]};
+  app.renderPaycheckReporting();assert.match(element("#paycheckReportingNote").innerHTML,/Configure payroll plans in Settings/);
 });
 
 test("month filters can switch, clear on a second click, and respond to keyboard activation",()=>{

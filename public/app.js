@@ -6,7 +6,7 @@ const sourceDateLabel = (value,options={}) => {
   const [year,month,day]=String(value||"").split("-").map(Number);
   return new Intl.DateTimeFormat("en-US",{...options,timeZone:"UTC"}).format(new Date(Date.UTC(year,month-1,day,12)));
 };
-const state = {accounts:[],transactions:[],categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,closing_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
+const state = {accounts:[],transactions:[],reportTransactions:null,paycheckMode:null,defaultPaycheckMode:"take-home",reporting:null,categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,closing_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
 const colors=["#e97567","#6d5dfc","#e6a04b","#28a792","#9f938c","#60a5c5","#d577aa"];
 const csvMappingFields=[
   {key:"date",label:"Date",required:true,aliases:["date","transaction date","posted date","posting date"]},
@@ -82,6 +82,7 @@ function updateDateLabel(){
 
 function queryString() {
   const p=new URLSearchParams();
+  if(state.paycheckMode)p.set("paycheck_mode",state.paycheckMode);
   if(state.filters.from)p.set("from",state.filters.from);
   if(state.filters.to)p.set("to",state.filters.to);
   if(state.filters.accounts.size)p.set("accounts",[...state.filters.accounts].join(","));
@@ -96,12 +97,15 @@ async function load(initial=false) {
     request(`/api/net-worth?${queryString()}`)
   ]);
   if(initial){state.accounts=data.accounts;state.categories=data.categories;state.categoryGroups=data.category_groups||[];state.views=data.views||[];buildFilterOptions();renderAccounts();renderSavedViews();}
-  state.transactions=data.transactions;state.summary=data.summary;state.netWorth=netWorth;
+  state.transactions=data.transactions;state.reportTransactions=data.report_transactions||data.transactions;state.summary=data.summary;state.netWorth=netWorth;
+  state.reporting=data.reporting||null;
+  state.paycheckMode=data.reporting?.mode||state.paycheckMode||"take-home";
+  state.defaultPaycheckMode=data.reporting?.default_mode||"take-home";
   render();
 }
 
 function currentReportConfiguration(){
-  return {version:1,filters:{
+  return {version:1,paycheck_mode:state.paycheckMode||"take-home",filters:{
     range:state.range,
     from:state.filters.from,
     to:state.filters.to,
@@ -113,6 +117,7 @@ function currentReportConfiguration(){
 }
 
 function applyReportConfiguration(configuration,{rebuild=true}={}){
+  state.paycheckMode=configuration?.paycheck_mode==="full-paycheck"?"full-paycheck":"take-home";
   const filters=configuration?.filters||{};
   if(["month","quarter","year","all"].includes(filters.range)) setRange(filters.range);
   else{
@@ -131,7 +136,7 @@ function applyReportConfiguration(configuration,{rebuild=true}={}){
 }
 
 function applyDefaultReportConfiguration(){
-  applyReportConfiguration({version:1,filters:{
+  applyReportConfiguration({version:1,paycheck_mode:state.defaultPaycheckMode,filters:{
     range:"quarter",
     accounts:[],
     categories:[],
@@ -159,6 +164,7 @@ function reportSettingsSummary(){
   const range=filter.range==="custom"?$("#dateLabel").textContent:{month:"This month",quarter:"Rolling 3 months",year:"This year",all:"All time"}[filter.range]||$("#dateLabel").textContent;
   const accountNames=filter.accounts.map(id=>state.accounts.find(account=>account.id===id)).filter(Boolean).map(account=>account.name);
   const rows=[
+    ["Paycheck reporting",state.paycheckMode==="full-paycheck"?"Full paycheck · take-home + payroll retirement":"Take-home"],
     ["Date range",range],
     ["Month focus",filter.month?cashFlowMonthLabel(filter.month):"All months in range"],
     ["Accounts",accountNames.length?accountNames.join(", "):"All accounts"],
@@ -219,6 +225,7 @@ async function navigateFromLocation(){
 }
 
 function render(){
+  renderPaycheckReporting();
   const {totals}=state.summary;
   $("#netValue").textContent=fmt(totals.net);
   $("#incomeValue").textContent=fmt(totals.income);
@@ -226,6 +233,17 @@ function render(){
   $("#transferValue").textContent=fmt(totals.transfer);
   $("#donutTotal").textContent=fmt(totals.expense,true);
   renderChart();renderCategories();renderTransactions();renderInsights();renderCashFlow();renderNetWorth();updateFilterCount();
+}
+
+function renderPaycheckReporting(){
+  $("#paycheckMode").value=state.paycheckMode||"take-home";
+  const relevant=["overview","cashflow","insights","transactions"].includes(state.section);
+  $("#paycheckModeControl").hidden=!relevant;
+  const full=state.paycheckMode==="full-paycheck";
+  $("#paycheckReportingNote").hidden=!full||!relevant;
+  $("#paycheckReportingNote").innerHTML=!(state.reporting?.contribution_account_ids?.length)
+    ? `Full paycheck needs contribution-source accounts. <a href="/settings">Configure payroll plans in Settings</a>. No additional income is inferred yet.`
+    : `Full paycheck = take-home + payroll retirement contributions (${fmt(state.reporting.contribution_amount||0)} in this date range). Internal plan movements are transfers. Taxes and benefits are not inferred; stored transaction categories and net worth are unchanged.`;
 }
 
 function renderChart(){
@@ -294,7 +312,14 @@ async function loadSettings(){
 
 function renderSettings(){
   if(!state.settings)return;
-  const {plaid,ai,database}=state.settings;
+  const {plaid,ai,database,paycheck_reporting:paycheck}=state.settings;
+  if(paycheck){
+    $("#defaultPaycheckMode").value=paycheck.paycheck_mode;
+    $("#payrollPlanAccounts").innerHTML=paycheck.accounts.map(account=>{
+      const role=paycheck.contribution_account_ids.includes(account.id)?"source":paycheck.plan_account_ids.includes(account.id)?"plan":"none";
+      return `<label class="payroll-account-row"><span><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(account.institution)} · ${account.contribution_count} contribution record${account.contribution_count===1?"":"s"} · ${fmt(account.contribution_amount)}</small></span><select data-payroll-account="${account.id}" aria-label="Payroll role for ${escapeHtml(account.name)}"><option value="none" ${role==="none"?"selected":""}>Not part of a payroll plan</option><option value="source" ${role==="source"?"selected":""}>Contribution source · count once</option><option value="plan" ${role==="plan"?"selected":""}>Within plan · transfers / trades</option></select></label>`;
+    }).join("")||`<p class="muted">Connect an investment account to configure payroll contributions.</p>`;
+  }
   $("#plaidEnvironment").value=plaid.environment;
   $("#plaidClientId").value=plaid.client_id;
   $("#plaidSecret").value="";
@@ -427,9 +452,15 @@ function updateNetWorthHover(event){
 function groupForCategory(category){return state.categoryGroups.find(group=>group.categories.includes(category))?.name||"Other"}
 function transactionClass(transaction){const group=transaction.category_group||groupForCategory(transaction.category);return group==="Income"?"income":group==="Transfers"?"transfer":"expense"}
 
+function reportAdjustmentNote(transaction){
+  return transaction.report_adjustment==="payroll_contribution"
+    ? `<small>Payroll retirement contribution · report only; stored as ${escapeHtml(transaction.original_category)}</small>`:"";
+}
+
 function cashFlowTransactions(){
   const month=state.cashFlowMonthSelection;
-  return month?state.transactions.filter(transaction=>transaction.date.slice(0,7)===month):state.transactions;
+  const rows=state.reportTransactions||state.transactions;
+  return month?rows.filter(transaction=>transaction.date.slice(0,7)===month):rows;
 }
 
 function cashFlowData(){
@@ -537,7 +568,7 @@ function renderSankeyDetails(){
   $("#sankeyDetailsEmpty").hidden=Boolean(rows.length);
   $("#sankeyDetailsRows").innerHTML=rows.map(transaction=>{
     const amount=Number(transaction.amount)||0,formatted=amount>0?`+${fmt(amount)}`:fmt(amount);
-    return `<tr><td>${new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(transaction.merchant)}</strong>${transaction.note?`<small>${escapeHtml(transaction.note)}</small>`:""}</td><td>${escapeHtml(transaction.category_group||groupForCategory(transaction.category))}</td><td><span class="category-chip">${escapeHtml(transaction.category)}</span></td><td>${escapeHtml(transaction.account_name)}</td><td class="right amount ${amount>0?"positive":""}">${formatted}</td></tr>`;
+    return `<tr><td>${new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(transaction.merchant)}</strong>${transaction.note?`<small>${escapeHtml(transaction.note)}</small>`:""}${reportAdjustmentNote(transaction)}</td><td>${escapeHtml(transaction.category_group||groupForCategory(transaction.category))}</td><td><span class="category-chip">${escapeHtml(transaction.category)}</span></td><td>${escapeHtml(transaction.account_name)}</td><td class="right amount ${amount>0?"positive":""}">${formatted}</td></tr>`;
   }).join("");
 }
 
@@ -559,7 +590,7 @@ function renderCashFlowMonthDetails(){
   $("#cashflowMonthDetailsEmpty").hidden=Boolean(rows.length);
   $("#cashflowMonthDetailsRows").innerHTML=rows.map(transaction=>{
     const amount=Number(transaction.amount)||0,formatted=amount>0?`+${fmt(amount)}`:fmt(amount);
-    return `<tr><td>${new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(transaction.merchant)}</strong>${transaction.note?`<small>${escapeHtml(transaction.note)}</small>`:""}</td><td>${escapeHtml(transaction.category_group||groupForCategory(transaction.category))}</td><td><span class="category-chip">${escapeHtml(transaction.category)}</span></td><td>${escapeHtml(transaction.account_name)}</td><td class="right amount ${amount>0?"positive":""}">${formatted}</td></tr>`;
+    return `<tr><td>${new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(transaction.merchant)}</strong>${transaction.note?`<small>${escapeHtml(transaction.note)}</small>`:""}${reportAdjustmentNote(transaction)}</td><td>${escapeHtml(transaction.category_group||groupForCategory(transaction.category))}</td><td><span class="category-chip">${escapeHtml(transaction.category)}</span></td><td>${escapeHtml(transaction.account_name)}</td><td class="right amount ${amount>0?"positive":""}">${formatted}</td></tr>`;
   }).join("");
 }
 
@@ -918,13 +949,37 @@ function switchSection(section,{push=true,preserveView=false}={}){
   $(".toolbar").style.display=section==="settings"?"none":"flex";
   $("#transactionsSection").style.display=["overview","transactions"].includes(section)?"block":"none";
   $("#seeAllBtn").style.display=section==="transactions"?"none":"block";
-  renderReportContext();renderTransactions();
+  renderPaycheckReporting();renderReportContext();renderTransactions();
   document.title=`${state.activeView?.name||$("#pageTitle").textContent} — Moneta`;
   if(push&&location.pathname!==sectionPaths[section])history.pushState({},"",sectionPaths[section]);
   window.scrollTo({top:0,behavior:"smooth"});
 }
 
 function bind(){
+  $("#paycheckMode").onchange=async event=>{
+    const select=event.currentTarget,previous=state.paycheckMode;
+    select.disabled=true;
+    try{
+      const settings=await request("/api/settings/paycheck-reporting",{method:"PUT",body:JSON.stringify({paycheck_mode:select.value})});
+      state.settings=settings;state.paycheckMode=settings.paycheck_reporting.paycheck_mode;state.defaultPaycheckMode=state.paycheckMode;
+      detachSavedView();state.sankeySelection=null;
+      await load();
+    }catch(error){state.paycheckMode=previous;select.value=previous;toast(error.message)}finally{select.disabled=false}
+  };
+  $("#paycheckSettingsForm").onsubmit=async event=>{
+    event.preventDefault();const submit=event.submitter||$("#paycheckSettingsForm button[type=submit]");submit.disabled=true;
+    try{
+      const roles=$$("[data-payroll-account]");
+      state.settings=await request("/api/settings/paycheck-reporting",{method:"PUT",body:JSON.stringify({
+        paycheck_mode:$("#defaultPaycheckMode").value,
+        contribution_account_ids:roles.filter(select=>select.value==="source").map(select=>Number(select.dataset.payrollAccount)),
+        plan_account_ids:roles.filter(select=>select.value!=="none").map(select=>Number(select.dataset.payrollAccount))
+      })});
+      state.defaultPaycheckMode=state.settings.paycheck_reporting.paycheck_mode;
+      if(!state.activeView)state.paycheckMode=state.defaultPaycheckMode;
+      state.sankeySelection=null;renderSettings();await load();toast("Paycheck reporting saved");
+    }catch(error){toast(error.message)}finally{submit.disabled=false}
+  };
   $$("#datePresets button").forEach(b=>b.onclick=async()=>{detachSavedView();setRange(b.dataset.range);await load()});
   $$(".nav-item[data-section]").forEach(b=>b.onclick=()=>navigateSection(b.dataset.section).catch(error=>toast(error.message)));
   $("#brandLink").onclick=event=>{event.preventDefault();navigateSection("overview").catch(error=>toast(error.message))};

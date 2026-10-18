@@ -6,6 +6,7 @@ import { loadEnvFile } from "node:process";
 import { DatabaseSync } from "node:sqlite";
 import { encode as encodeToon } from "@toon-format/toon";
 import { createSyncLock } from "./lib/sync-lock.mjs";
+import { PAYCHECK_MODES, normalizePaycheckReporting, isContribution, projectPaycheckTransactions } from "./lib/paycheck-reporting.mjs";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 try { loadEnvFile(join(ROOT, ".env")); } catch (error) {
@@ -231,10 +232,32 @@ function plaidRedirectStatus(configuration=plaidConfiguration()) {
   };
 }
 let categorizationProgress={running:false,requested:0,processed:0,categorized:0,failed:0,requests:0,started_at:"",finished_at:"",message:""};
+function paycheckReportingConfiguration() {
+  try { return normalizePaycheckReporting(JSON.parse(getSetting("paycheck_reporting") || "{}")); }
+  catch { return normalizePaycheckReporting(); }
+}
+
+function paycheckReportingSettings() {
+  const configuration=paycheckReportingConfiguration();
+  const accounts=db.prepare("SELECT id,institution,COALESCE(NULLIF(nickname,''),name) name FROM accounts WHERE type='investment' ORDER BY id").all();
+  const contributions=new Map();
+  if(accounts.length){
+    const rows=listTransactions(new URLSearchParams({accounts:accounts.map(account=>account.id).join(",")}),{investmentEvidence:true});
+    for(const row of rows){
+      if(!isContribution(row))continue;
+      const totals=contributions.get(row.account_id)||{contribution_count:0,contribution_amount:0};
+      totals.contribution_count++;totals.contribution_amount+=row.amount;
+      contributions.set(row.account_id,totals);
+    }
+  }
+  return {...configuration,accounts:accounts.map(account=>({...account,...(contributions.get(account.id)||{contribution_count:0,contribution_amount:0})}))};
+}
+
 function publicSettings() {
   const configuration=plaidConfiguration();
   const ai=aiConfiguration();
   return {
+    paycheck_reporting:paycheckReportingSettings(),
     plaid:{
       client_id:configuration.clientId,
       secret_configured:Boolean(configuration.secret),
@@ -1028,6 +1051,12 @@ function removeAccount(accountId) {
     }
     const transactionsDeleted = db.prepare("DELETE FROM transactions WHERE account_id=?").run(accountId).changes;
     db.prepare("DELETE FROM accounts WHERE id=?").run(accountId);
+    const reporting=paycheckReportingConfiguration();
+    if(reporting.plan_account_ids.includes(accountId)){
+      reporting.contribution_account_ids=reporting.contribution_account_ids.filter(id=>id!==accountId);
+      reporting.plan_account_ids=reporting.plan_account_ids.filter(id=>id!==accountId);
+      saveSetting.run("paycheck_reporting",JSON.stringify(reporting));
+    }
     let disconnectedItem = false;
     if (account.plaid_item_id) {
       const remaining = db.prepare("SELECT COUNT(*) AS n FROM accounts WHERE plaid_item_id=?").get(account.plaid_item_id).n;
@@ -1354,7 +1383,7 @@ function startPlaidSync(itemId) {
   return {item_id:itemId,pending:true,already_running:false};
 }
 
-function listTransactions(params) {
+function listTransactions(params,{investmentEvidence=false}={}) {
   const clauses = ["1=1"], values = [];
   if (params.get("from")) { clauses.push("t.date >= ?"); values.push(params.get("from")); }
   if (params.get("to")) { clauses.push("t.date <= ?"); values.push(params.get("to")); }
@@ -1372,13 +1401,42 @@ function listTransactions(params) {
   }
   return db.prepare(`
     SELECT t.*, COALESCE(NULLIF(a.nickname,''),a.name) account_name, a.institution, a.color account_color
+      ${investmentEvidence?", l.type investment_action, l.subtype investment_subtype":""}
     FROM transactions t JOIN accounts a ON a.id=t.account_id
+    ${investmentEvidence?"LEFT JOIN investment_ledger l ON l.external_id=t.external_id AND l.account_id=t.account_id":""}
     WHERE ${clauses.join(" AND ")}
     ORDER BY t.date DESC, t.id DESC
   `).all(...values).map(transaction => {
     const {original_details_json,...publicTransaction}=transaction;
-    return {...publicTransaction,has_original_details:Boolean(original_details_json),category_group:categoryGroupFor(transaction.category)};
+    const evidence=investmentEvidence?transactionEvidence(transaction):null;
+    return {...publicTransaction,has_original_details:Boolean(original_details_json),category_group:categoryGroupFor(transaction.category),
+      ...(evidence?{investment_action:evidence.investment_action,investment_subtype:evidence.investment_subtype}:{})};
   });
+}
+
+function transactionReport(params) {
+  const configuration=paycheckReportingConfiguration();
+  const mode=PAYCHECK_MODES.has(params.get("paycheck_mode"))?params.get("paycheck_mode"):configuration.paycheck_mode;
+  const transactions=listTransactions(params);
+  let rows=transactions;
+  if(mode==="full-paycheck"){
+    // Filter report categories/search AFTER projection, so a Paychecks filter
+    // includes payroll contributions even though their stored category is Transfer.
+    const sourceParams=new URLSearchParams(params);
+    sourceParams.delete("categories");sourceParams.delete("search");
+    rows=projectPaycheckTransactions(listTransactions(sourceParams,{investmentEvidence:true}),configuration,mode);
+    const categories=(params.get("categories")||"").split(",").filter(Boolean);
+    const search=(params.get("search")||"").toLocaleLowerCase("en-US");
+    rows=rows.filter(row=>(!categories.length||categories.includes(row.category))&&(!search||[row.merchant,row.category,row.note].some(value=>String(value||"").toLocaleLowerCase("en-US").includes(search))));
+  }
+  const contributions=rows.filter(row=>row.report_adjustment==="payroll_contribution");
+  return {transactions,report_transactions:rows,summary:summary(rows),reporting:{
+    mode,default_mode:configuration.paycheck_mode,
+    contribution_account_ids:configuration.contribution_account_ids,
+    plan_account_ids:configuration.plan_account_ids,
+    contribution_count:contributions.length,
+    contribution_amount:contributions.reduce((total,row)=>total+row.amount,0)
+  }};
 }
 
 function summary(rows) {
@@ -1422,6 +1480,7 @@ function normalizeReportConfiguration(value = {}) {
     : [];
   return {
     version:1,
+    ...(PAYCHECK_MODES.has(source.paycheck_mode)?{paycheck_mode:source.paycheck_mode}:{}),
     filters:{
       range,
       from:date(filters.from),
@@ -1854,12 +1913,25 @@ async function api(req, res, url) {
       SELECT a.*, p.status plaid_status, p.error_code plaid_error_code, p.last_sync plaid_last_sync
       FROM accounts a LEFT JOIN plaid_items p ON p.id=a.plaid_item_id ORDER BY a.id
     `).all().map(accountForClient);
-    const transactions = listTransactions(url.searchParams);
+    const report = transactionReport(url.searchParams);
     const dbCategories = db.prepare("SELECT DISTINCT category FROM transactions ORDER BY category").all();
     const categories = [...new Set([...MONARCH_CATEGORIES, ...dbCategories.map(row=>row.category)])];
-    return json(res, {accounts, transactions, categories, category_groups:categoryTaxonomy(dbCategories), views:listReportViews(), summary:summary(transactions)});
+    return json(res, {accounts, ...report, categories, category_groups:categoryTaxonomy(dbCategories), views:listReportViews()});
   }
   if (req.method === "GET" && url.pathname === "/api/settings") {
+    return json(res,publicSettings());
+  }
+  if (req.method === "PUT" && url.pathname === "/api/settings/paycheck-reporting") {
+    const value=await body(req);
+    if(value.paycheck_mode!==undefined&&!PAYCHECK_MODES.has(value.paycheck_mode))return json(res,{error:"Choose take-home or full-paycheck reporting."},400);
+    for(const key of ["contribution_account_ids","plan_account_ids"]){
+      if(value[key]!==undefined&&(!Array.isArray(value[key])||value[key].some(id=>!Number.isInteger(id)||id<=0)))
+        return json(res,{error:"Plan accounts must be a list of account IDs."},400);
+    }
+    const configuration=normalizePaycheckReporting({...paycheckReportingConfiguration(),...value});
+    const validIds=new Set(db.prepare("SELECT id FROM accounts WHERE type='investment'").all().map(account=>account.id));
+    if(configuration.plan_account_ids.some(id=>!validIds.has(id)))return json(res,{error:"Choose existing investment accounts for payroll plans."},400);
+    saveSetting.run("paycheck_reporting",JSON.stringify(configuration));
     return json(res,publicSettings());
   }
   if (req.method === "PUT" && url.pathname === "/api/settings/plaid") {
@@ -2050,8 +2122,7 @@ async function api(req, res, url) {
     return json(res,{results},results.some(result=>result.error)?207:200);
   }
   if (req.method === "GET" && url.pathname === "/api/transactions") {
-    const rows = listTransactions(url.searchParams);
-    return json(res, {transactions:rows, summary:summary(rows)});
+    return json(res, transactionReport(url.searchParams));
   }
   if (req.method === "POST" && url.pathname === "/api/transactions") {
     const v = await body(req);

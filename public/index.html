@@ -55,10 +55,13 @@
         <button data-range="all">All time</button>
       </div>
       <div class="toolbar-right">
+        <label class="paycheck-mode-control" id="paycheckModeControl">Paycheck reporting<select id="paycheckMode"><option value="take-home">Take-home</option><option value="full-paycheck">Full paycheck · net + retirement</option></select></label>
         <button class="quiet-btn" id="dateBtn">◷ <span id="dateLabel">May 1 – Jul 8</span></button>
         <button class="quiet-btn" id="filterBtn">☷ Filters <span class="filter-count" id="filterCount">0</span></button>
       </div>
     </section>
+
+    <p class="paycheck-reporting-note" id="paycheckReportingNote" role="status" hidden></p>
 
     <section class="view active" id="overviewView">
       <div class="kpi-grid">
@@ -171,6 +174,15 @@
 
     <section class="view" id="settingsView">
       <div class="settings-grid">
+        <article class="card settings-card payroll-settings-card">
+          <div class="settings-card-heading"><div><p class="eyebrow">REPORTING</p><h2>Paycheck reporting</h2><p>Choose take-home income or include payroll retirement contributions. This is not gross pay: withheld taxes and benefits are not estimated.</p></div></div>
+          <form id="paycheckSettingsForm" class="settings-form">
+            <label class="full">Default reporting mode<select id="defaultPaycheckMode"><option value="take-home">Take-home</option><option value="full-paycheck">Full paycheck · take-home + payroll retirement</option></select><small>The report toolbar can also switch modes. Saved views remember their own mode.</small></label>
+            <div class="full payroll-plan-help"><strong>Identify each plan's contribution entry point</strong><p>Mark only the account where payroll contributions first arrive as “Contribution source.” Mark linked accounts such as BrokerageLink as “Within plan.” Do not mark a self-funded IRA as a contribution source.</p><p>Only cash transactions explicitly labelled “contribution” by the data source count as payroll income, once. Generic deposits, withdrawals, and investment purchases/sales within the plan remain transfers. Contribution corrections reduce income. Source metadata is required; descriptions alone are not used.</p></div>
+            <div class="full payroll-plan-accounts" id="payrollPlanAccounts"></div>
+            <div class="settings-form-actions full"><button class="primary-btn" type="submit">Save paycheck reporting</button></div>
+          </form>
+        </article>
         <article class="card settings-card">
           <div class="settings-card-heading"><div><p class="eyebrow">CONNECTIONS</p><h2>Plaid configuration</h2><p>Credentials are stored in the local SQLite database and used immediately.</p></div><span class="settings-status" id="plaidSettingsStatus">Not configured</span></div>
           <form id="plaidSettingsForm" class="settings-form">

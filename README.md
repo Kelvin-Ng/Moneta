@@ -14,6 +14,7 @@ database and can import financial data through Plaid or CSV.
 - Monarch-style category groups and categories
 - Batched AI categorization with provider-neutral rules and re-categorization
 - Filterable cash-flow totals, monthly bar chart, and interactive Sankey report
+- Take-home or full-paycheck reporting (take-home plus payroll retirement contributions), with explicit plan-account roles to avoid counting internal movements twice
 - Daily net-worth history that uses source-labelled dates directly, preserves
   partial earlier history, and requires complete selected-account coverage only
   for the newest historical date
@@ -33,6 +34,33 @@ Sankey, and transaction details to that month within the active report filters.
 The bar chart retains all months in the date range for comparison. Click the
 selected month again to clear the month filter. Saved views remember the month
 filter as part of their configuration.
+
+### Paycheck reporting
+
+Use the **Paycheck reporting** selector in the toolbar to choose:
+
+- **Take-home**: report the stored transaction categories as usual.
+- **Full paycheck**: include take-home pay plus payroll retirement contributions.
+  This is not gross salary; withheld taxes and benefits are not inferred.
+
+In **Settings → Paycheck reporting**, identify your retirement-plan accounts.
+Mark the account where payroll contributions first arrive as **Contribution
+source**. Mark downstream accounts, such as BrokerageLink, as **Within plan**.
+Only explicit cash/contribution events in a contribution-source account become
+Paychecks in full-paycheck reports. Generic deposits, withdrawals, transfers,
+and trades within the configured plan remain transfers, preventing a contribution
+from being counted again when it moves or is invested. Contribution corrections
+reduce income. Interest and dividends retain their income categories. Do not
+select a self-funded IRA as a payroll contribution source.
+
+This requires structured investment-action/subtype metadata from Plaid or mapped
+CSV columns; descriptions alone are not used to infer payroll income. Select only
+one entry point for each contribution stream, not every account receiving it.
+All report filters, chart totals, Sankey flows, and drill-down lists use the same
+reporting mode. Account filters still apply, so excluding the contribution-source
+account excludes its payroll contributions. Mode and account roles are stored in
+SQLite; saved report views also remember their own reporting mode. No stored
+transaction categories, AI protection flags, or net-worth balances are changed.
 
 ## Requirements
 
