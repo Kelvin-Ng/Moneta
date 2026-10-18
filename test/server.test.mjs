@@ -280,8 +280,8 @@ test("category groups classify transactions and positive expenses reduce totals"
 
 test("AI evidence carries confidence and distinguishes card repayments, app funding, and actual payments across providers",async()=>{
   const database=new DatabaseSync(join(temp,"test.db"));
-  const accountId=Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES(?,?,?)")
-    .run("Evidence Test","Synthetic Checking","checking").lastInsertRowid);
+  const accountId=Number(database.prepare("INSERT INTO accounts(institution,name,nickname,type) VALUES(?,?,?,?)")
+    .run("Evidence Test","private-account-name","private-account-nickname","checking").lastInsertRowid);
   const originals=[
     {source:"plaid",investment:false,transaction:{name:"Example Card-Pmt Withdrawal DDA_TRANSACTION",
       amount:425.5,account_id:"private-account-id",transaction_id:"private-transaction-id",
@@ -335,6 +335,8 @@ test("AI evidence carries confidence and distinguishes card repayments, app fund
       assert.match(system,/Venmo-Payment-\.\.\. Withdrawal DDA_TRANSACTION/);
       assert.match(system,/should remain Transfer/);
       assert.match(system,/Do not invent a spending purpose or choose Fun Money/);
+      assert.match(system,/The institution field identifies where the transaction's account is held, not the merchant or recipient/);
+      assert.match(system,/Relevant user rules override the general categorization guidance and source-category hints/);
       assert.doesNotMatch(system,/Peer-to-peer payments such as Venmo or PayPal are not automatically transfers/);
       const evidence=decodeToon(user).transactions;
       assert.equal(evidence[0].description,originals[0].transaction.name);
@@ -346,8 +348,9 @@ test("AI evidence carries confidence and distinguishes card repayments, app fund
       assert.equal(evidence[2].memo,null);
       assert.equal(evidence[3].memo,"Dinner");
       assert.equal(evidence[3].counterparty,"Example Friend");
-      assert.doesNotMatch(user,/private-account-id|private-transaction-id|confidence_level/);
-      assert.ok(evidence.every(row=>["original_details","date","institution","account_name","matching_transaction","related_transactions"].every(field=>!Object.hasOwn(row,field))));
+      assert.ok(evidence.every(row=>row.institution==="Evidence Test"));
+      assert.doesNotMatch(user,/private-account-id|private-transaction-id|private-account-name|private-account-nickname|confidence_level/);
+      assert.ok(evidence.every(row=>["original_details","date","account_name","nickname","matching_transaction","related_transactions"].every(field=>!Object.hasOwn(row,field))));
     }
 
     // The same optional evidence can be mapped from arbitrary CSV headers.
@@ -362,10 +365,80 @@ test("AI evidence carries confidence and distinguishes card repayments, app fund
     assert.equal(imported.status,200);
     assert.equal((await imported.json()).categorization.categorized,1);
     assert.equal(decodeToon(aiRequests[0].payload.contents.at(-1).parts.at(-1).text).transactions[0].source_category_confidence,"MEDIUM");
+    assert.equal(decodeToon(aiRequests[0].payload.contents.at(-1).parts.at(-1).text).transactions[0].institution,"Evidence Test");
     const saved=database.prepare(`SELECT original_details_json FROM transactions WHERE id IN (${ids.map(()=>"?").join(",")}) ORDER BY id`).all(...ids);
     assert.deepEqual(saved.map(row=>JSON.parse(row.original_details_json)),originals);
   } finally {
     await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
+    await fetch(`http://localhost:${port}/api/settings/ai`,{
+      method:"PUT",headers:{"content-type":"application/json"},
+      body:JSON.stringify({protocol:"openai-compatible",endpoint:"",model:"",rules:"",clear_api_key:true})
+    });
+    database.close();
+  }
+});
+
+test("AI account-scoped rules receive the owning institution for Plaid, CSV, and manual transactions",async()=>{
+  const database=new DatabaseSync(join(temp,"test.db"));
+  const fixtures=[
+    {institution:"Bilt Rewards",type:"credit",original:{source:"plaid",transaction:{name:"Venmo",amount:2875,
+      institution:"untrusted-source-institution",personal_finance_category:{primary:"TRANSFER_OUT",detailed:"TRANSFER_OUT_TRANSFER_OUT_FROM_APPS"}}}},
+    {institution:"Wealthfront",type:"checking",original:{source:"csv",row:{description:"Bilt Card - HOUSING Withdrawal WITHDRAWAL",amount:-2875,
+      institution:"untrusted-source-institution",account_type:"credit"}}},
+    {institution:"Venmo - Personal",type:"checking",original:{source:"manual",submitted:{merchant:'Example Landlord "Rent"',amount:-2875,
+      institution:"untrusted-source-institution",account_type:"credit"}}}
+  ];
+  const accountIds=[],transactionIds=[];
+  const rules="Bilt housing flow: outgoing Venmo housing charges on Bilt Rewards credit accounts are Rent. Payment - Bilt Housing credits and source-bank Bilt Housing withdrawals are Credit Card Payment. Direct rent payments in Venmo accounts remain Rent.";
+  try {
+    for(const fixture of fixtures){
+      const accountId=Number(database.prepare("INSERT INTO accounts(institution,name,nickname,type) VALUES(?,?,?,?)")
+        .run(fixture.institution,"private-owned-account-name","private-owned-account-nickname",fixture.type).lastInsertRowid);
+      accountIds.push(accountId);
+      const transactionId=Number(database.prepare(`INSERT INTO transactions(
+        account_id,date,merchant,category,amount,original_details_json,category_source,categorization_status
+      ) VALUES(?,?,?,?,?,?,'fallback','pending')`).run(accountId,"2026-08-15","Venmo","Transfer",-2875,JSON.stringify(fixture.original)).lastInsertRowid);
+      transactionIds.push(transactionId);
+    }
+    for(const adapter of [
+      {protocol:"openai-compatible",endpoint:`http://127.0.0.1:${plaidPort}/v1/chat/completions`},
+      {protocol:"openai-responses",endpoint:`http://127.0.0.1:${plaidPort}/v1/responses`},
+      {protocol:"anthropic",endpoint:`http://127.0.0.1:${plaidPort}/v1/messages`},
+      {protocol:"gemini",endpoint:`http://127.0.0.1:${plaidPort}/v1beta`}
+    ]){
+      const settings=await fetch(`http://localhost:${port}/api/settings/ai`,{
+        method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({...adapter,model:"mock-institution-model",api_key:"mock-key",rules})
+      });
+      assert.equal(settings.status,200);
+      assert.equal((await settings.json()).ai.rules,rules);
+      aiRequests=[];
+      const response=await fetch(`http://localhost:${port}/api/categorization/run`,{
+        method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({transaction_ids:transactionIds})
+      });
+      assert.equal(response.status,200);
+      assert.equal((await response.json()).categorized,fixtures.length);
+      assert.equal(aiRequests.length,1);
+      const request=aiRequests[0].payload;
+      const system=adapter.protocol==="anthropic"?request.system
+        :adapter.protocol==="gemini"?request.systemInstruction.parts[0].text
+        :adapter.protocol==="openai-responses"?request.instructions:request.messages[0].content;
+      const user=adapter.protocol==="openai-responses"?request.input
+        :adapter.protocol==="gemini"?request.contents.at(-1).parts.at(-1).text:request.messages.at(-1).content;
+      assert.ok(system.includes(rules));
+      const evidence=decodeToon(user).transactions;
+      assert.equal(evidence.length,fixtures.length);
+      fixtures.forEach((fixture,index)=>{
+        const row=evidence.find(row=>row.id===transactionIds[index]);
+        assert.equal(row.institution,fixture.institution);
+        assert.equal(row.account_type,fixture.type);
+      });
+      assert.doesNotMatch(user,/untrusted-source-institution|private-owned-account-name|private-owned-account-nickname/);
+      assert.ok(evidence.every(row=>["account_name","nickname","account_id","matching_transaction","related_transactions"].every(field=>!Object.hasOwn(row,field))));
+    }
+    const saved=database.prepare(`SELECT original_details_json FROM transactions WHERE id IN (${transactionIds.map(()=>"?").join(",")}) ORDER BY id`).all(...transactionIds);
+    assert.deepEqual(saved.map(row=>JSON.parse(row.original_details_json)),fixtures.map(fixture=>fixture.original));
+  } finally {
+    for(const accountId of accountIds)await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
     await fetch(`http://localhost:${port}/api/settings/ai`,{
       method:"PUT",headers:{"content-type":"application/json"},
       body:JSON.stringify({protocol:"openai-compatible",endpoint:"",model:"",rules:"",clear_api_key:true})
@@ -978,7 +1051,7 @@ test("AI categorization stores original details and batches transactions through
   assert.equal(sent[0].memo,"Direct deposit");
   assert.equal("date" in sent[0],false);
   assert.equal("original_details" in sent[0],false);
-  assert.equal("institution" in sent[0],false);
+  assert.equal(sent[0].institution,"AI Test");
   assert.equal("source_category_confidence" in sent[0],false);
 
   const transactions=(await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountId}`)).json()).transactions;
@@ -1009,6 +1082,7 @@ test("AI categorization stores original details and batches transactions through
   assert.equal(csvEvidence.source_category_confidence,"LOW");
   assert.equal(csvEvidence.transaction_code,"DDA_TRANSACTION");
   assert.equal(csvEvidence.account_type,"cash");
+  assert.equal(csvEvidence.institution,"AI Test");
   assert.equal("date" in csvEvidence,false);
   assert.equal("payment_channel" in csvEvidence,false);
   assert.equal("external_id" in csvEvidence,false);

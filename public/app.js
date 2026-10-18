@@ -1093,7 +1093,7 @@ function bind(){
   const runCategorization=async all=>{
     const count=all?(state.settings.ai.counts.categorized||0)+(state.settings.ai.counts.pending||0)+(state.settings.ai.counts.error||0):(state.settings.ai.counts.pending||0)+(state.settings.ai.counts.error||0);
     if(!count)return toast("There are no transactions to categorize");
-    if(!confirm(`${all?"Re-categorize all":"Categorize pending"} ${count} transaction${count===1?"":"s"}?\n\nCompact categorization evidence will be sent to ${state.settings.ai.model}. Full source records stay local. This may incur provider charges.`))return;
+    if(!confirm(`${all?"Re-categorize all":"Categorize pending"} ${count} transaction${count===1?"":"s"}?\n\nCompact categorization evidence, including account institution and type, will be sent to ${state.settings.ai.model}. Account names, nicknames, and full source records stay local. This may incur provider charges.`))return;
     state.settings.ai.progress={running:true,requested:count,processed:0,categorized:0,failed:0,requests:0,message:"Starting categorization"};renderSettings();
     const poll=setInterval(async()=>{try{state.settings=await request("/api/settings");renderSettings()}catch{}},750);
     try{

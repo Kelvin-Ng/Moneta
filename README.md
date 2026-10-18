@@ -184,6 +184,11 @@ Transactions from Acme Payroll are Paychecks.
 Payments recorded in a peer-to-peer account with lunch or dinner memos are Restaurants & Bars; source-bank funding entries are Transfer.
 ```
 
+Rules can be scoped to the account's institution and type. The institution
+identifies where the account is held, not the merchant or recipient. Relevant
+user rules take precedence over the prompt's general guidance and source
+category hints.
+
 New uncategorized transactions retain a deterministic fallback category until
 AI categorization succeeds. Moneta sends multiple pending transactions together,
 up to 50 per provider request. Failed requests keep the existing category and
@@ -208,9 +213,9 @@ budget.
 The complete source payload received for each new Plaid, CSV, demo, or manual
 transaction is stored locally for future re-categorization. It is not sent to
 the AI provider. Moneta extracts a compact, shared evidence record containing
-the signed amount, description, and account type plus useful fields that are
-actually available, such as merchant, memo, counterparty, source categories,
-source-category confidence, transaction code, and investment facts. Source
+the signed amount, description, account institution, and account type plus useful
+fields that are actually available, such as merchant, memo, counterparty, source
+categories, source-category confidence, transaction code, and investment facts. Source
 categories are hints: the prompt treats low or unknown confidence as weak
 evidence and prioritizes explicit card-repayment wording over conflicting
 spending categories. Card branding alone does not turn an actual rent payment
@@ -222,9 +227,9 @@ because source fields that were never stored cannot be recovered retroactively.
 
 Categorization sends the compact evidence fields and natural-language rules to
 the configured AI provider. It does not send transaction dates, payment channels,
-account or institution names, balances, external IDs, locations, or full source
-payloads. Review that provider's privacy and data-retention terms before using
-the feature with real financial data.
+account names or nicknames, account numbers, balances, external IDs, locations,
+or full source payloads. Review that provider's privacy and data-retention terms
+before using the feature with real financial data.
 
 ## Local data and security
 

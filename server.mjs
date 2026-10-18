@@ -575,6 +575,7 @@ function transactionEvidence(row) {
     source_category_confidence:evidenceText(plaid.personal_finance_category?.confidence_level,source.source_category_confidence,source.category_confidence)?.toUpperCase()||null,
     transaction_code:evidenceText(plaid.transaction_code,source.transaction_code),
     account_type:row.account_type,
+    institution:evidenceText(row.account_institution),
     investment_action:evidenceText(row.investment_action,source.investment_action,original.investment?plaid.type:null),
     investment_subtype:evidenceText(row.investment_subtype,source.investment_subtype,original.investment?plaid.subtype:null),
     security:evidenceText(row.security_name,source.security_name),
@@ -590,7 +591,7 @@ function transactionEvidence(row) {
 function categorizationPrompts(rows, rules) {
   const taxonomy=MONARCH_CATEGORY_GROUPS.map(group=>`${group.name}: ${group.categories.join(", ")}`).join("\n");
   const system=`You categorize personal-finance transactions. Choose exactly one supported category for every transaction.
-The category group determines cash-flow behavior: Income categories are income, Transfers categories are transfers, and every other group is expense. Amounts use Moneta's signed convention: positive is money in or a credit and negative is money out or a charge. A positive amount in an expense category is a refund or credit and must remain in that expense category. Use the description, normalized merchant, memo, counterparty, source categories, transaction code, account type, and investment facts when supplied. Source categories are hints, not authoritative answers.
+The category group determines cash-flow behavior: Income categories are income, Transfers categories are transfers, and every other group is expense. Amounts use Moneta's signed convention: positive is money in or a credit and negative is money out or a charge. A positive amount in an expense category is a refund or credit and must remain in that expense category. Use the description, normalized merchant, memo, counterparty, source categories, transaction code, account institution and type, and investment facts when supplied. Source categories are hints, not authoritative answers. The institution field identifies where the transaction's account is held, not the merchant or recipient. Use it with account_type to apply account-scoped user rules; do not infer the account's institution from a payment app mentioned in the description. Relevant user rules override the general categorization guidance and source-category hints.
 
 Distinguish actual peer-to-peer payments recorded in a payment-app account from the source bank's funding or settlement entries. For an actual payment recorded in a Venmo or PayPal account, infer its purpose from the recipient, memo, and other evidence; for example, a dinner payment can be Restaurants & Bars despite a transfer source-category hint. In contrast, bank entries that fund or settle activity in the user's payment-app account are Transfer, not the underlying expense: counting both as expenses would double-count spending. A generic bank withdrawal such as "Venmo - Payment Withdrawal WITHDRAWAL" or "Venmo-Payment-... Withdrawal DDA_TRANSACTION", with only the app as counterparty, no recipient or purpose memo, and an app-transfer source-category hint, should remain Transfer. Do not invent a spending purpose or choose Fun Money, Personal, Restaurants & Bars, or another expense category merely because a generic funding entry mentions a payment app. Infer a purchase category only from evidence of the actual payment's purpose, not the app name or amount alone. User rules remain authoritative when relevant.
 
@@ -606,7 +607,7 @@ ${rules||"No additional user rules."}
 
 Return JSON only, matching the requested schema, with exactly ${rows.length} results. Copy every input transaction ID exactly once; never invent, omit, or repeat an ID.`;
   const allEvidence=rows.map(transactionEvidence);
-  const required=["id","amount","description","account_type"];
+  const required=["id","amount","description","account_type","institution"];
   const optional=["merchant","memo","counterparty","source_category","source_category_detail","source_category_confidence","transaction_code","investment_action","investment_subtype","security","ticker","quantity","price","fees"];
   const fields=[...required,...optional.filter(field=>allEvidence.some(evidence=>evidence[field]!==null&&evidence[field]!==undefined))];
   const transactions=allEvidence.map(evidence=>Object.fromEntries(fields.map(field=>[field,evidence[field]??null])));
@@ -678,7 +679,7 @@ async function categorizeTransactionsNow({transactionIds=null,all=false}={}) {
   const clauses=["t.ai_categorization_disabled=0"];const values=[];
   if(normalizedIds?.length){clauses.push(`t.id IN (${normalizedIds.map(()=>"?").join(",")})`);values.push(...normalizedIds)}
   else if(!all)clauses.push("t.categorization_status IN ('pending','error')");
-  const rows=db.prepare(`SELECT t.*,a.type account_type,l.type investment_action,l.subtype investment_subtype,
+  const rows=db.prepare(`SELECT t.*,a.type account_type,a.institution account_institution,l.type investment_action,l.subtype investment_subtype,
       l.quantity investment_quantity,l.price investment_price,l.fees investment_fees,
       s.name security_name,s.ticker_symbol
     FROM transactions t JOIN accounts a ON a.id=t.account_id
