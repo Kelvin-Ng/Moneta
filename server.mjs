@@ -1425,7 +1425,8 @@ function normalizeReportConfiguration(value = {}) {
       to:date(filters.to),
       accounts,
       categories:strings(filters.categories),
-      search:String(filters.search || "").trim().slice(0,200)
+      search:String(filters.search || "").trim().slice(0,200),
+      ...(/^\d{4}-(0[1-9]|1[0-2])$/.test(String(filters.month||""))?{month:String(filters.month)}:{})
     }
   };
 }

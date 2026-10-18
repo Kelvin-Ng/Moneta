@@ -28,6 +28,12 @@ database and can import financial data through Plaid or CSV.
 Every main page has a direct URL, including `/overview`, `/cash-flow`,
 `/net-worth`, `/transactions`, `/accounts`, `/insights`, and `/settings`.
 
+On the cash-flow report, click a month in the bar chart to filter the totals,
+Sankey, and transaction details to that month within the active report filters.
+The bar chart retains all months in the date range for comparison. Click the
+selected month again to clear the month filter. Saved views remember the month
+filter as part of their configuration.
+
 ## Requirements
 
 - Node.js 22.5 or newer; Node.js 24 is recommended

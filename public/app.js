@@ -61,6 +61,7 @@ async function request(path, options) {
 }
 
 function setRange(range) {
+  state.cashFlowMonthSelection=null;
   const now=new Date(), start=new Date(now);
   if(range==="month") start.setDate(1);
   if(range==="quarter") start.setMonth(now.getMonth()-2,1);
@@ -106,7 +107,8 @@ function currentReportConfiguration(){
     to:state.filters.to,
     accounts:[...state.filters.accounts].map(Number),
     categories:[...state.filters.categories],
-    search:state.filters.search
+    search:state.filters.search,
+    ...(state.cashFlowMonthSelection?{month:state.cashFlowMonthSelection}:{})
   }};
 }
 
@@ -123,6 +125,7 @@ function applyReportConfiguration(configuration,{rebuild=true}={}){
   state.filters.accounts=new Set((filters.accounts||[]).map(String));
   state.filters.categories=new Set(filters.categories||[]);
   state.filters.search=String(filters.search||"");
+  state.cashFlowMonthSelection=/^\d{4}-(0[1-9]|1[0-2])$/.test(filters.month||"")?filters.month:null;
   $("#searchInput").value=state.filters.search;
   if(rebuild)buildFilterOptions();
 }
@@ -145,7 +148,9 @@ function renderSavedViews(){
 function renderReportContext(){
   $("#reportContextLabel").textContent=state.activeView?"SAVED REPORT VIEW":"LIVE REPORT";
   $("#reportContextName").textContent=state.activeView?.name||"Cash flow";
-  $("#reportContextDescription").textContent=state.activeView?"Settings are stored; values are recalculated from current data.":"Calculated from current data using the active report settings.";
+  $("#reportContextDescription").textContent=state.cashFlowMonthSelection
+    ? `Showing ${cashFlowMonthLabel(state.cashFlowMonthSelection)} within the active filters. The bar chart keeps the full date range; click the selected month again to clear.`
+    : state.activeView?"Settings are stored; values are recalculated from current data.":"Calculated from current data using the active report settings.";
   renderSavedViews();
 }
 
@@ -155,6 +160,7 @@ function reportSettingsSummary(){
   const accountNames=filter.accounts.map(id=>state.accounts.find(account=>account.id===id)).filter(Boolean).map(account=>account.name);
   const rows=[
     ["Date range",range],
+    ["Month focus",filter.month?cashFlowMonthLabel(filter.month):"All months in range"],
     ["Accounts",accountNames.length?accountNames.join(", "):"All accounts"],
     ["Categories",filter.categories.length?`${filter.categories.length} selected`:"All categories"],
     ["Search",filter.search||"Any description"]
@@ -421,9 +427,14 @@ function updateNetWorthHover(event){
 function groupForCategory(category){return state.categoryGroups.find(group=>group.categories.includes(category))?.name||"Other"}
 function transactionClass(transaction){const group=transaction.category_group||groupForCategory(transaction.category);return group==="Income"?"income":group==="Transfers"?"transfer":"expense"}
 
+function cashFlowTransactions(){
+  const month=state.cashFlowMonthSelection;
+  return month?state.transactions.filter(transaction=>transaction.date.slice(0,7)===month):state.transactions;
+}
+
 function cashFlowData(){
   const income=new Map(),expenses=new Map();
-  for(const tx of state.transactions){
+  for(const tx of cashFlowTransactions()){
     const amount=Number(tx.amount)||0,group=tx.category_group||groupForCategory(tx.category),classification=transactionClass(tx);
     if(classification==="income"){const key=`${group}\u0000${tx.category}`;income.set(key,(income.get(key)||0)+amount)}
     if(classification==="expense"){const key=`${group}\u0000${tx.category}`;expenses.set(key,(expenses.get(key)||0)-amount)}
@@ -433,7 +444,10 @@ function cashFlowData(){
 }
 
 function renderCashFlow(){
-  const {income,expense,net}=state.summary.totals;
+  const months=state.summary.months.filter(month=>month.income||month.expense);
+  const selectedMonth=months.find(month=>month.month===state.cashFlowMonthSelection);
+  if(state.cashFlowMonthSelection&&!selectedMonth)state.cashFlowMonthSelection=null;
+  const {income,expense}=selectedMonth||state.summary.totals,net=income-expense;
   $("#cashflowIncome").textContent=fmt(income);
   $("#cashflowExpense").textContent=fmt(expense);
   $("#cashflowNet").textContent=fmt(net);
@@ -442,8 +456,8 @@ function renderCashFlow(){
   const rate=income?net/income*100:0;
   $("#cashflowRate").textContent=`${rate.toFixed(1)}%`;
   $("#cashflowRate").classList.toggle("negative",rate<0);
-  const availableMonths=new Set(state.summary.months.filter(month=>month.income||month.expense).map(month=>month.month));
-  if(state.cashFlowMonthSelection&&!availableMonths.has(state.cashFlowMonthSelection))state.cashFlowMonthSelection=null;
+  $("#cashflowIncomeLabel").textContent=selectedMonth?`For ${cashFlowMonthLabel(selectedMonth.month)} · active filters applied`:"For the active date range";
+  renderReportContext();
   renderCashFlowBars();renderCashFlowMonthDetails();renderSankey();renderSankeyDetails();
 }
 
@@ -508,7 +522,7 @@ function clearSankeySelection(){
 function renderSankeyDetails(){
   const details=$("#sankeyDetails"),selection=state.sankeySelection;
   if(!selection){details.hidden=true;return}
-  const rows=state.transactions.filter(transaction=>{
+  const rows=cashFlowTransactions().filter(transaction=>{
     if(transactionClass(transaction)!==selection.side)return false;
     return selection.scope==="category"
       ? transaction.category===selection.name
@@ -534,7 +548,7 @@ function cashFlowMonthLabel(month,short=false,includeYear=false){
 function renderCashFlowMonthDetails(){
   const details=$("#cashflowMonthDetails"),month=state.cashFlowMonthSelection;
   if(!month){details.hidden=true;return}
-  const rows=state.transactions.filter(transaction=>transactionClass(transaction)!=="transfer"&&transaction.date.slice(0,7)===month);
+  const rows=cashFlowTransactions().filter(transaction=>transactionClass(transaction)!=="transfer");
   const income=rows.filter(transaction=>transactionClass(transaction)==="income").reduce((sum,transaction)=>sum+(Number(transaction.amount)||0),0);
   const expense=rows.filter(transaction=>transactionClass(transaction)==="expense").reduce((sum,transaction)=>sum-(Number(transaction.amount)||0),0);
   const net=income-expense,rate=income?net/income*100:null;
@@ -550,8 +564,10 @@ function renderCashFlowMonthDetails(){
 }
 
 function selectCashFlowMonth(month){
+  if(!state.summary.months.some(item=>item.month===month&&(item.income||item.expense)))return;
+  detachSavedView();
   state.cashFlowMonthSelection=state.cashFlowMonthSelection===month?null:month;
-  renderCashFlowBars();renderCashFlowMonthDetails();
+  renderCashFlow();
   if(state.cashFlowMonthSelection)requestAnimationFrame(()=>$("#cashflowMonthDetails").scrollIntoView({behavior:"smooth",block:"start"}));
 }
 
@@ -597,7 +613,7 @@ function renderCashFlowBars(){
   }
   data.forEach((month,index)=>{
     const center=pad.l+groupW*(index+.5),incomeY=y(month.income),expenseY=y(month.expense),label=cashFlowMonthLabel(month.month,true,data.length>12),selected=state.cashFlowMonthSelection===month.month;
-    html+=`<g class="cashflow-month-group${selected?" selected":""}" data-cashflow-month="${month.month}" data-cashflow-index="${index}" role="button" tabindex="0" aria-label="Show transactions for ${cashFlowMonthLabel(month.month)}">${selected?`<rect class="cashflow-month-selection" x="${pad.l+groupW*index+3}" y="${pad.t}" width="${Math.max(1,groupW-6)}" height="${plotH}" rx="8"/>`:""}<rect class="cashflow-income-bar" x="${center-barW-2}" y="${Math.min(incomeY,zeroY)}" width="${barW}" height="${Math.abs(zeroY-incomeY)}" rx="4"/><rect class="cashflow-expense-bar" x="${center+2}" y="${Math.min(expenseY,zeroY)}" width="${barW}" height="${Math.abs(zeroY-expenseY)}" rx="4"/><text x="${center}" y="${H-17}" text-anchor="middle" class="axis-label">${label}</text><rect class="cashflow-month-hit" x="${pad.l+groupW*index}" y="${pad.t}" width="${groupW}" height="${H-pad.t-pad.b+30}" fill="transparent"/></g>`;
+    html+=`<g class="cashflow-month-group${selected?" selected":""}" data-cashflow-month="${month.month}" data-cashflow-index="${index}" role="button" tabindex="0" aria-pressed="${selected}" aria-label="${selected?"Clear month filter for":"Filter cash flow to"} ${cashFlowMonthLabel(month.month)}">${selected?`<rect class="cashflow-month-selection" x="${pad.l+groupW*index+3}" y="${pad.t}" width="${Math.max(1,groupW-6)}" height="${plotH}" rx="8"/>`:""}<rect class="cashflow-income-bar" x="${center-barW-2}" y="${Math.min(incomeY,zeroY)}" width="${barW}" height="${Math.abs(zeroY-incomeY)}" rx="4"/><rect class="cashflow-expense-bar" x="${center+2}" y="${Math.min(expenseY,zeroY)}" width="${barW}" height="${Math.abs(zeroY-expenseY)}" rx="4"/><text x="${center}" y="${H-17}" text-anchor="middle" class="axis-label">${label}</text><rect class="cashflow-month-hit" x="${pad.l+groupW*index}" y="${pad.t}" width="${groupW}" height="${H-pad.t-pad.b+30}" fill="transparent"/></g>`;
   });
   const line=netValues.map((value,index)=>`${index?"L":"M"} ${pad.l+groupW*(index+.5)} ${y(value)}`).join(" ");
   html+=`<path d="${line}" class="cashflow-net-line"/>`;
@@ -977,6 +993,7 @@ function bind(){
   };
   $("#applyFilters").onclick=async()=>{
     detachSavedView();
+    if(state.filters.from!==$("#fromDate").value||state.filters.to!==$("#toDate").value)state.cashFlowMonthSelection=null;
     state.filters.from=$("#fromDate").value;state.filters.to=$("#toDate").value;
     state.range="custom";$$("#datePresets button").forEach(button=>button.classList.remove("active"));
     state.filters.accounts=new Set($$("#accountChecks input:checked").map(x=>x.value));

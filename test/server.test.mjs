@@ -650,6 +650,24 @@ test("report views persist configuration without calculated values",async()=>{
   assert.equal((await fetch(`http://localhost:${port}/api/views/${view.id}`)).status,404);
 });
 
+test("saved cash-flow views retain optional month focus without narrowing their chart date range",async()=>{
+  for(const month of ["2026-09","2026-13"]){
+    const configuration={version:1,filters:{range:"custom",from:"2026-08-01",to:"2026-10-31",accounts:[],categories:[],search:"",month}};
+    const created=await fetch(`http://localhost:${port}/api/views`,{
+      method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({name:"Month focus",configuration})
+    });
+    assert.equal(created.status,201);
+    const view=await created.json();
+    const fetched=await (await fetch(`http://localhost:${port}/api/views/${view.id}`)).json();
+    assert.equal(fetched.configuration.filters.from,"2026-08-01");
+    assert.equal(fetched.configuration.filters.to,"2026-10-31");
+    if(month==="2026-09")assert.equal(fetched.configuration.filters.month,month);
+    else assert.equal(Object.hasOwn(fetched.configuration.filters,"month"),false);
+    assert.equal(Object.hasOwn(fetched,"summary"),false);
+    assert.equal((await fetch(`http://localhost:${port}/api/views/${view.id}`,{method:"DELETE"})).status,200);
+  }
+});
+
 test("accounts can be removed along with their local transactions",async()=>{
   const accountRes=await fetch(`http://localhost:${port}/api/accounts`,{
     method:"POST",headers:{"content-type":"application/json"},
