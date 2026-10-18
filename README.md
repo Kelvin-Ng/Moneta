@@ -10,7 +10,7 @@ database and can import financial data through Plaid or CSV.
 - Plaid connections for supported banks, cards, and brokerages, including on-demand investment refreshes
 - Standalone account sync and optional daily scheduling, independent of the web server
 - Optional account nicknames shown throughout reports, filters, and transaction lists
-- Credit-card payment matching so transfers are not counted as duplicate expenses
+- Credit-card payments and transfers excluded by category; automatic pairing keeps categories unchanged
 - Monarch-style category groups and categories
 - Batched AI categorization with provider-neutral rules and re-categorization
 - Filterable cash-flow totals, monthly bar chart, and interactive Sankey report
@@ -113,8 +113,11 @@ npm run sync
 
 The command uses the same database, Plaid settings, transaction cursors,
 investment refreshes, transfer matching, and optional AI categorization as the
-website. It works whether the web server is running or stopped and can be run
-from any directory with `node /absolute/path/to/Moneta/scripts/sync.mjs`.
+website. Transfer matching only links transactions for reconciliation; it never
+changes categories or AI/manual categorization metadata. Report totals depend
+on category groups, not transaction pairing. It works whether the web server is
+running or stopped and can be run from any directory with
+`node /absolute/path/to/Moneta/scripts/sync.mjs`.
 Per-connection database locks prevent simultaneous jobs from importing from the
 same cursor; locks left by terminated processes are recovered automatically.
 Incomplete initial history is retried, and a failed connection does not prevent

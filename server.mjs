@@ -2195,8 +2195,8 @@ async function api(req, res, url) {
 }
 
 function detectTransfers() {
-  db.prepare(`UPDATE transactions SET category='Credit Card Payment',category_source='transfer-match',
-    categorization_status='categorized',categorization_error=NULL WHERE transfer_pair_id IS NOT NULL`).run();
+  // Pairing is reconciliation metadata only. Categories and their provenance
+  // belong to the categorizer or user; reports classify by category group.
   const transferCategories=MONARCH_CATEGORY_GROUPS.find(group=>group.name==="Transfers").categories;
   const candidates=db.prepare(`
     SELECT t.* FROM transactions t WHERE t.transfer_pair_id IS NULL
@@ -2208,8 +2208,8 @@ function detectTransfers() {
     const a=candidates[i], b=candidates[j];
     const days=Math.abs((new Date(a.date)-new Date(b.date))/86400000);
     if (a.account_id!==b.account_id && days<=4 && Math.abs(a.amount+b.amount)<0.01 && !a.transfer_pair_id && !b.transfer_pair_id) {
-      db.prepare("UPDATE transactions SET category='Credit Card Payment',category_source='transfer-match',categorization_status='categorized',categorization_error=NULL,transfer_pair_id=? WHERE id=?").run(b.id,a.id);
-      db.prepare("UPDATE transactions SET category='Credit Card Payment',category_source='transfer-match',categorization_status='categorized',categorization_error=NULL,transfer_pair_id=? WHERE id=?").run(a.id,b.id);
+      db.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(b.id,a.id);
+      db.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(a.id,b.id);
       a.transfer_pair_id=b.id; b.transfer_pair_id=a.id; matched++;
     }
   }

@@ -180,6 +180,61 @@ test("transfer matching endpoint is safe to run repeatedly",async()=>{
   assert.equal((await two.json()).matched,0);
 });
 
+test("transfer matching only links transactions and preserves categories, metadata, and report classification",async()=>{
+  const database=new DatabaseSync(join(temp,"test.db"));
+  const accountIds=[];
+  try {
+    for(const type of ["checking","credit"]){
+      accountIds.push(Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES(?,?,?)")
+        .run("Pairing Test",`${type} account`,type).lastInsertRowid));
+    }
+    const fixtures=[
+      {category:"Credit Card Payment",amount:-11001.23,source:"manual",disabled:1},
+      {category:"Transfer",amount:11001.23,source:"fallback",status:"pending"},
+      {category:"Buy",amount:-12002.35,source:"ai"},
+      {category:"Sell",amount:12002.35,source:"manual",disabled:1},
+      {category:"Groceries",amount:-33003.57,source:"manual",disabled:1},
+      {category:"Paychecks",amount:33003.57,source:"ai",status:"error",error:"Keep this categorization error"}
+    ];
+    const ids=fixtures.map((fixture,index)=>Number(database.prepare(`INSERT INTO transactions(
+      account_id,date,merchant,category,amount,category_source,categorization_status,
+      categorization_error,categorized_at,ai_categorization_disabled,original_details_json
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(accountIds[index%2],"2026-08-01","Payment matching test",
+      fixture.category,fixture.amount,fixture.source,fixture.status||"categorized",fixture.error||null,
+      "2026-08-01 12:34:56",fixture.disabled||0,JSON.stringify({source:"test",description:fixture.category})).lastInsertRowid));
+    const rows=()=>database.prepare("SELECT * FROM transactions WHERE account_id IN (?,?) ORDER BY id").all(...accountIds);
+    const withoutPair=transactions=>transactions.map(({transfer_pair_id,...transaction})=>transaction);
+    const original=withoutPair(rows());
+
+    const first=await fetch(`http://localhost:${port}/api/detect-transfers`,{method:"POST"});
+    assert.equal(first.status,200);
+    assert.equal((await first.json()).matched,3);
+    assert.deepEqual(withoutPair(rows()),original);
+    assert.deepEqual(rows().map(row=>row.transfer_pair_id),[ids[1],ids[0],ids[3],ids[2],ids[5],ids[4]]);
+    const report=await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountIds.join(",")}`)).json();
+    assert.equal(report.summary.totals.income,33003.57);
+    assert.equal(report.summary.totals.expense,33003.57);
+    assert.equal(report.transactions.find(transaction=>transaction.id===ids[2]).category,"Buy");
+    assert.equal(report.transactions.find(transaction=>transaction.id===ids[3]).category,"Sell");
+
+    // A user can change an already-paired transaction without the next match
+    // resetting its category or categorization metadata.
+    const edited=await fetch(`http://localhost:${port}/api/transactions/${ids[2]}`,{
+      method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({category:"Personal"})
+    });
+    assert.equal(edited.status,200);
+    const afterEdit=rows();
+    const second=await fetch(`http://localhost:${port}/api/detect-transfers`,{method:"POST"});
+    assert.equal(second.status,200);
+    assert.equal((await second.json()).matched,0);
+    assert.deepEqual(rows(),afterEdit);
+    assert.equal(rows().find(transaction=>transaction.id===ids[2]).category,"Personal");
+  } finally {
+    for(const id of accountIds)await fetch(`http://localhost:${port}/api/accounts/${id}`,{method:"DELETE"});
+    database.close();
+  }
+});
+
 test("category groups classify transactions and positive expenses reduce totals",async()=>{
   const accountResponse=await fetch(`http://localhost:${port}/api/accounts`,{
     method:"POST",headers:{"content-type":"application/json"},
@@ -985,8 +1040,10 @@ test("AI categorization stores original details and batches transactions through
   const afterAll=(await (await fetch(`http://localhost:${port}/api/bootstrap`)).json()).transactions;
   for(const externalId of ["demo:tx:5","demo:tx:6"]){
     const transfer=afterAll.find(transaction=>transaction.external_id===externalId);
-    assert.equal(transfer.category,"Credit Card Payment");
-    assert.equal(transfer.category_source,"transfer-match");
+    assert.equal(transfer.category,"Miscellaneous");
+    assert.equal(transfer.category_source,"ai");
+    assert.equal(transfer.categorization_status,"categorized");
+    assert.ok(transfer.transfer_pair_id);
   }
   await fetch(`http://localhost:${port}/api/accounts/${accountId}`,{method:"DELETE"});
 });
