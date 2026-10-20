@@ -15,6 +15,7 @@ database and can import financial data through Plaid or CSV.
 - Batched AI categorization with provider-neutral rules and re-categorization
 - Filterable cash-flow totals, monthly bar chart, and interactive Sankey report
 - Account-endpoint cash-flow mode with a configurable boundary including bank, investment, cash, and credit-card accounts
+- Conditional cash-flow exclusions with an inspectable match list and saved-view support
 - Take-home or full-paycheck reporting (take-home plus payroll retirement contributions), with explicit plan-account roles to avoid counting internal movements twice
 - Daily net-worth history that uses source-labelled dates directly, preserves
   partial earlier history, and requires complete selected-account coverage only
@@ -86,6 +87,38 @@ the displayed movements using their stored categories and descriptions.
 The mode and endpoint choices persist in SQLite and can be saved in a report view.
 Overview, transaction activity, net-worth reporting, and AI categorization are
 unchanged.
+
+### Exclude transactions from cash-flow reports
+
+Open **Cash flow → Exclude transactions**, add a rule, and click **Apply exclusions**.
+For example: **Description contains "Example Merchant" AND Account equals "Checking"**.
+All conditions in a rule must match (AND); any matching rule excludes the transaction
+(OR). Rules can be named, disabled, edited, or removed. Remove all rules and apply to
+clear exclusions. Apply draft changes before saving a view.
+
+Conditions support description, note/memo, institution, account, category, category
+group, date, signed amount, and absolute amount. Text supports contains, does not
+contain, equals, does not equal, starts with, and ends with. Text comparisons are
+literal and case-insensitive, not regular expressions. Numeric/date comparisons
+support equality and ordered comparisons; dates use ISO calendar dates. Up to 30
+rules with 10 conditions each are supported.
+
+Rules match the stored/source transaction fields before full-paycheck or investment
+fee projections. Description matching checks both the displayed description and the
+original Plaid/CSV description; memo matching also checks the source memo. Excluding
+an investment trade removes its projected trading fee too. Transfer matching retains
+its complete peer context, so excluding one internal-transfer leg cannot turn the
+other leg into external income or an expense.
+
+Both transaction and account-endpoint cash-flow modes apply the rules consistently
+to totals, monthly bars, Sankey, account summaries, and drill-down lists. Expand
+**Inspect transactions excluded by rules** to see source transactions and matched
+rule names under the current filters and selected month. Rules persist locally in
+SQLite and are included in saved report configurations; matches are recalculated
+from current data. Overview, activity, stored categories, AI protection, and net
+worth are unchanged. A view with no exclusions does not inherit another report's
+rules. Report configurations are sent in a read-only POST request body, avoiding
+URL-length limits for larger rule sets.
 
 ### Paycheck reporting
 

@@ -947,6 +947,110 @@ test("general endpoints support broker funding, investment metadata and fees, an
   }
 });
 
+test("cash-flow exclusion rules persist and evaluate source descriptions without mutating activity or category metadata",async()=>{
+  const database=new DatabaseSync(join(temp,"test.db"));database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000");
+  const base=`http://localhost:${port}`,accountIds=[],ids=[];
+  const before=(await (await fetch(`${base}/api/bootstrap`)).json()).cash_flow.default_configuration;
+  const jsonRequest=async(path,value,method="POST")=>fetch(`${base}${path}`,{method,headers:{"content-type":"application/json"},body:JSON.stringify(value)});
+  let viewId;
+  try{
+    for(const [name,type] of [["Rule checking","checking"],["Rule broker","investment"]])accountIds.push(Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES('Test',?,?)").run(name,type).lastInsertRowid));
+    const [bank,broker]=accountIds;
+    const add=(account,date,amount,category,merchant,details={})=>{
+      const id=Number(database.prepare(`INSERT INTO transactions(account_id,date,amount,category,merchant,original_details_json,category_source,categorization_status,ai_categorization_disabled)
+        VALUES(?,?,?,?,?,?,'manual','categorized',1)`).run(account,date,amount,category,merchant,JSON.stringify(details)).lastInsertRowid);ids.push(id);return id;
+    };
+    add(bank,"2026-09-01",1000,"Paychecks","Rule salary");
+    const excludedId=add(bank,"2026-09-02",-100,"Groceries","Displayed merchant",{source:"csv",row:{merchant:"Displayed merchant",description:"Example adjustment"}});
+    add(bank,"2026-09-03",-50,"Groceries","Normal groceries");
+    const out=add(bank,"2026-09-04",-500,"Transfer","Funding adjustment");
+    const into=add(broker,"2026-09-05",500,"Transfer","Broker deposit");
+    database.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(into,out);
+    database.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(out,into);
+    add(broker,"2026-09-06",-202,"Buy","Trade adjustment",{source:"plaid",investment:true,transaction:{type:"buy",fees:2}});
+    const sourceRows=()=>database.prepare("SELECT * FROM transactions WHERE id>=? AND id<=? ORDER BY id").all(ids[0],ids.at(-1));
+    const snapshot=sourceRows();
+    const exclusions=[{name:"Adjustments",enabled:true,conditions:[{field:"description",operator:"contains",value:"ADJUSTMENT"}]},
+      {name:"Disabled",enabled:false,conditions:[{field:"amount",operator:"lt",value:0}]}];
+    const config={mode:"transactions",endpoint_account_ids:[bank,broker],exclusions};
+    const saved=await jsonRequest("/api/settings/cash-flow",config,"PUT");assert.equal(saved.status,200);
+    assert.deepEqual(await saved.json(),config);
+    const query=new URLSearchParams({from:"2026-09-01",to:"2026-09-30",accounts:accountIds.join(",")});
+    let response=await (await fetch(`${base}/api/bootstrap?${query}`)).json();
+    assert.equal(response.transactions.some(row=>row.id===excludedId),true);
+    assert.equal(response.summary.totals.expense,150);
+    assert.equal(response.cash_flow.transaction_report.summary.totals.expense,50);
+    assert.equal(response.cash_flow.transaction_report.excluded_transactions.length,3);
+    assert.equal(response.cash_flow.transaction_report.excluded_transactions.find(row=>row.id===excludedId).report_description,"Example adjustment");
+    const configuration={version:1,paycheck_mode:"take-home",cash_flow:{...config,mode:"bank-endpoints"},filters:{range:"custom",from:"2026-09-01",to:"2026-09-30",accounts:accountIds,categories:[],search:""}};
+    const settingsSnapshot=database.prepare("SELECT value FROM settings WHERE key='cash_flow_reporting'").get().value;
+    response=await (await jsonRequest("/api/reports/transactions",{configuration,bootstrap:true})).json();
+    assert.ok(response.accounts);assert.ok(response.category_groups);
+    assert.equal(response.cash_flow.report.summary.totals.income,1000);
+    assert.equal(response.cash_flow.report.summary.totals.expense,50);
+    assert.equal(response.cash_flow.report.internal_transfers[0].id,into);
+    assert.equal(response.cash_flow.report.excluded_transactions.length,3);
+    assert.equal(response.cash_flow.transaction_report,null);
+    assert.equal(database.prepare("SELECT value FROM settings WHERE key='cash_flow_reporting'").get().value,settingsSnapshot);
+    assert.deepEqual(sourceRows(),snapshot);
+
+    // A saved view with no exclusions must not inherit the normal page's rules.
+    const noRules={...configuration,cash_flow:{mode:"transactions",endpoint_account_ids:[]}};
+    const normal=await (await jsonRequest("/api/reports/transactions",{configuration:noRules})).json();
+    assert.equal(normal.cash_flow.configuration.exclusions,undefined);
+    assert.equal(normal.cash_flow.transaction_report,null);
+    assert.equal(normal.summary.totals.expense,150);
+    for(const endpoint of ["/api/settings/cash-flow","/api/views","/api/reports/transactions"]){
+      const bad={mode:"transactions",exclusions:[{conditions:[{field:"description",operator:"contains",value:""}]}]};
+      const payload=endpoint==="/api/settings/cash-flow"?bad:{name:"Invalid",configuration:{cash_flow:bad}};
+      assert.equal((await jsonRequest(endpoint,payload,endpoint==="/api/settings/cash-flow"?"PUT":"POST")).status,400);
+    }
+    const view=await (await jsonRequest("/api/views",{name:"Exclusions saved",configuration})).json();viewId=view.id;
+    const fetched=await (await fetch(`${base}/api/views/${viewId}`)).json();assert.deepEqual(fetched.configuration,configuration);
+    assert.equal("excluded_transactions" in fetched,false);
+    const readAgain=await (await jsonRequest("/api/reports/transactions",{configuration:fetched.configuration})).json();
+    assert.equal(readAgain.cash_flow.report.excluded_transactions.length,3);
+    add(bank,"2026-09-07",-75,"Groceries","New adjustment");
+    const recalculated=await (await jsonRequest("/api/reports/transactions",{configuration:fetched.configuration})).json();
+    assert.equal(recalculated.cash_flow.report.excluded_transactions.length,4);
+    assert.equal(recalculated.cash_flow.report.summary.totals.expense,50);
+    // Removing all rules really clears the persisted rules, rather than merging them back.
+    assert.equal((await jsonRequest("/api/settings/cash-flow",{exclusions:[]},"PUT")).status,200);
+    assert.equal((await (await fetch(`${base}/api/bootstrap?${query}`)).json()).cash_flow.configuration.exclusions,undefined);
+  }finally{
+    await jsonRequest("/api/settings/cash-flow",before,"PUT");
+    if(viewId)await fetch(`${base}/api/views/${viewId}`,{method:"DELETE"});
+    for(const id of accountIds){
+      database.prepare("UPDATE transactions SET transfer_pair_id=NULL WHERE account_id=? OR transfer_pair_id IN (SELECT id FROM transactions WHERE account_id=?)").run(id,id);
+      database.prepare("DELETE FROM accounts WHERE id=?").run(id);
+    }
+    database.close();
+  }
+});
+
+test("full-paycheck exclusions match original contribution categories before report projection",async()=>{
+  const database=new DatabaseSync(join(temp,"test.db"));database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000");
+  const base=`http://localhost:${port}`,accounts=[];
+  const before=(await (await fetch(`${base}/api/settings`)).json()).paycheck_reporting;
+  try{
+    for(const type of ["checking","investment"])accounts.push(Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES('Test','Rule payroll',?)").run(type).lastInsertRowid));
+    const [bank,plan]=accounts;
+    const insert=database.prepare("INSERT INTO transactions(account_id,date,amount,category,merchant,original_details_json) VALUES(?,'2026-09-10',?,?,'Payroll',?)");
+    insert.run(bank,1000,"Paychecks","{}");
+    insert.run(plan,200,"Transfer",JSON.stringify({source:"plaid",investment:true,transaction:{type:"cash",subtype:"contribution"}}));
+    await fetch(`${base}/api/settings/paycheck-reporting`,{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({contribution_account_ids:[plan],plan_account_ids:[plan]})});
+    const configuration={paycheck_mode:"full-paycheck",cash_flow:{mode:"transactions",exclusions:[{name:"Source transfers",conditions:[{field:"category",operator:"eq",value:"Transfer"}]}]},filters:{range:"all",accounts,categories:["Paychecks"]}};
+    const report=await (await fetch(`${base}/api/reports/transactions`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({configuration})})).json();
+    assert.equal(report.summary.totals.income,1200);
+    assert.equal(report.cash_flow.transaction_report.summary.totals.income,1000);
+    assert.equal(report.cash_flow.transaction_report.excluded_transactions[0].original_category,"Transfer");
+  }finally{
+    await fetch(`${base}/api/settings/paycheck-reporting`,{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify(before)});
+    for(const id of accounts)database.prepare("DELETE FROM accounts WHERE id=?").run(id);
+    database.close();
+  }
+});
+
 test("report views persist configuration without calculated values",async()=>{
   const configuration={version:1,filters:{range:"custom",from:"2026-06-01",to:"2026-06-30",accounts:[1],categories:["Groceries"],search:"market"}};
   const create=await fetch(`http://localhost:${port}/api/views`,{

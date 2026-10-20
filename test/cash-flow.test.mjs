@@ -38,7 +38,7 @@ function client({fetch:fetchOverride}={}) {
     globalThis.app={state,bind,renderCashFlow,selectCashFlowMonth,selectSankeyNode,
       cashFlowTransactions,cashFlowData,showCashFlowBarTooltip,setRange,
       currentReportConfiguration,applyReportConfiguration,applyDefaultReportConfiguration,renderPaycheckReporting,reportSettingsSummary,queryString,
-      bankEndpointMode,indexSankeyControls,setSankeyHover,load,
+      bankEndpointMode,indexSankeyControls,setSankeyHover,renderExclusionEditor,updateExclusionDraft,load,
       barData:()=>cashFlowBarChartState?.data};
   `,context);
   const app=context.app;
@@ -243,6 +243,71 @@ test("Sankey hover distinguishes repeated categories belonging to different endp
   app.setSankeyHover(controls[1],true);
   assert.equal(controls[0].classList.contains("related"),false);assert.equal(controls[2].classList.contains("related"),false);
   assert.equal(controls[1].classList.contains("related"),true);assert.equal(controls[3].classList.contains("related"),true);
+});
+
+test("cash-flow exclusions consistently update totals, bars, Sankey, details, and the audit list without changing activity",()=>{
+  const {app,element,clickMonth}=client(),originalTransactions=app.state.transactions,originalSummary=app.state.summary;
+  const excluded=app.state.transactions.find(row=>row.merchant==="September rent");
+  app.state.cashFlowConfiguration={mode:"transactions",endpoint_account_ids:[],exclusions:[{name:"Remove rent",enabled:true,conditions:[{field:"description",operator:"contains",value:"rent"}]}]};
+  app.state.cashFlowTransactionReport={transactions:originalTransactions.filter(row=>row!==excluded),excluded_transactions:[{...excluded,excluded_by:["Remove rent"]}],
+    summary:{totals:{income:6900,expense:1100,net:5800},months:originalSummary.months.map(row=>row.month==="2026-09"?{...row,expense:100}:row)}};
+  app.renderCashFlow();clickMonth("2026-09");
+  assert.equal(element("#cashflowExpense").textContent,"$100.00");
+  assert.equal(element("#cashflowNet").textContent,"$1,900.00");
+  assert.doesNotMatch(element("#cashflowSankey").innerHTML,/Rent/);
+  assert.doesNotMatch(element("#cashflowMonthDetailsRows").innerHTML,/September rent/);
+  assert.match(element("#exclusionMatchRows").innerHTML,/September rent/);
+  assert.match(element("#exclusionMatchRows").innerHTML,/Remove rent/);
+  assert.match(element("#exclusionReportStatus").textContent,/1 transaction excluded/);
+  assert.equal(element("#exclusionMatches").hidden,false);
+  assert.equal(app.barData().length,4);
+  assert.equal(app.state.transactions,originalTransactions);assert.equal(app.state.summary,originalSummary);
+  app.reportSettingsSummary();assert.match(element("#reportSettingsSummary").innerHTML,/1 enabled rules/);
+  const configuration=JSON.parse(JSON.stringify(app.currentReportConfiguration()));
+  app.applyReportConfiguration(configuration,{rebuild:false});
+  assert.equal(app.state.cashFlowConfiguration.exclusions[0].conditions[0].value,"rent");
+  configuration.cash_flow.exclusions[0].conditions[0].value="changed";
+  assert.equal(app.state.cashFlowConfiguration.exclusions[0].conditions[0].value,"rent");
+  app.applyDefaultReportConfiguration();assert.equal(app.state.cashFlowConfiguration.exclusions,undefined);
+});
+
+test("exclusion editor keeps draft edits separate from applied rules and supports numeric conditions",()=>{
+  const {app,element}=client();
+  element("#addExclusionRule").click();
+  assert.equal(app.state.exclusionDirty,true);assert.equal(app.state.exclusionDraft.length,1);
+  assert.equal(app.state.cashFlowConfiguration?.exclusions,undefined);
+  app.updateExclusionDraft(0,0,"value","<Example & Merchant>");
+  app.updateExclusionDraft(0,null,"name","My exclusion");app.renderExclusionEditor();
+  assert.match(element("#exclusionRules").innerHTML,/&lt;Example &amp; Merchant&gt;/);
+  assert.doesNotMatch(element("#exclusionRules").innerHTML,/<Example & Merchant>/);
+  app.updateExclusionDraft(0,0,"field","amount");
+  assert.equal(app.state.exclusionDraft[0].conditions[0].value,"");
+  app.updateExclusionDraft(0,0,"operator","lte");app.updateExclusionDraft(0,0,"value","-100");
+  assert.equal(app.state.exclusionDraft[0].conditions[0].value,-100);
+  app.updateExclusionDraft(0,null,"enabled",false);app.renderCashFlow();
+  assert.equal(app.state.exclusionDraft[0].enabled,false);
+  assert.equal(element("#exclusionDraftStatus").textContent,"Unsaved changes");
+  assert.equal(element("#cashflowExpense").textContent,"$1,500.00");
+  assert.equal(app.currentReportConfiguration().cash_flow.exclusions,undefined);
+});
+
+test("report loading sends large exclusion configurations in a read-only POST body, not the URL",async()=>{
+  const calls=[];
+  const rules=Array.from({length:20},(_,index)=>({name:`Rule ${index}`,enabled:true,conditions:[{field:"description",operator:"contains",value:"x".repeat(500)}]}));
+  const configuration={mode:"transactions",endpoint_account_ids:[],exclusions:rules};
+  const summary={totals:{income:1000,expense:0,net:1000,transfer:0},categories:[],groups:[],months:[{month:"2026-09",income:1000,expense:0}]};
+  const {app}=client({fetch:async(path,options)=>{
+    calls.push({path,options});
+    const data=path.startsWith("/api/net-worth")?{history:[],accounts:[],latest:0,change:0,closing_dates:0}
+      :{transactions:[],report_transactions:[],summary,cash_flow:{configuration,default_configuration:configuration,accounts:[],effective_endpoint_account_ids:[],report:null,transaction_report:{transactions:[],excluded_transactions:[],summary}}};
+    return {ok:true,json:async()=>data};
+  }});
+  app.state.cashFlowConfiguration=configuration;await app.load();
+  const report=calls.find(call=>call.path==="/api/reports/transactions");
+  assert.equal(report.options.method,"POST");
+  assert.ok(report.options.body.length>10000);
+  assert.equal(JSON.parse(report.options.body).configuration.cash_flow.exclusions.length,20);
+  assert.equal(calls.some(call=>call.path.includes("xxxx")),false);
 });
 
 test("month filters can switch, clear on a second click, and respond to keyboard activation",()=>{

@@ -126,3 +126,24 @@ test("including a credit card makes matched payments internal but keeps actual c
   assert.deepEqual(report.transactions.map(row=>row.id),[3,4]);
   assert.equal(bankCashFlowReport(rows,[endpoints[0]]).summary.totals.expense,100);
 });
+
+test("report exclusions preserve internal-transfer peer context and remove projected trade fees",()=>{
+  const endpoints=[{...accounts[0],type:"checking"},{id:3,name:"Broker",institution:"Broker",type:"investment"}];
+  const rows=[
+    row(1,1,-1000,"Transfer","2026-09-10",{merchant:"Exclude this leg",transfer_pair_id:2}),
+    row(2,3,1000,"Transfer","2026-09-11",{transfer_pair_id:1}),
+    row(3,3,-902,"Buy","2026-09-12",{merchant:"Excluded trade",investment_action:"buy",investment_fees:2}),
+    row(4,1,-10,"Groceries","2026-09-12",{merchant:"Visible purchase"})
+  ];
+  const exclusions=[{name:"One transfer leg",conditions:[{field:"description",operator:"contains",value:"this leg"}]},
+    {name:"Trade and fee",conditions:[{field:"description",operator:"eq",value:"Excluded trade"}]}];
+  const snapshot=structuredClone(rows),report=bankCashFlowReport(rows,endpoints,{exclusions});
+  assert.deepEqual(report.summary.totals,{income:0,expense:10,net:-10});
+  assert.deepEqual(report.excluded_transactions.map(row=>row.id),[1,3]);
+  assert.deepEqual(report.internal_transfers.map(row=>row.id),[2]);
+  assert.equal(report.investment_activity.length,0);
+  assert.deepEqual(report.transactions.map(row=>row.id),[4]);
+  assert.deepEqual(report.excluded_transactions[0].excluded_by,["One transfer leg"]);
+  assert.equal(bankCashFlowReport(rows,endpoints,{exclusions,categories:["Financial Fees"]}).excluded_transactions[0].id,3);
+  assert.deepEqual(rows,snapshot);
+});

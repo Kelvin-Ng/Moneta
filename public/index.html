@@ -111,6 +111,13 @@
         <div><p class="eyebrow" id="reportContextLabel">LIVE REPORT</p><strong id="reportContextName">Cash flow</strong><small id="reportContextDescription">Calculated from current data using the active report settings.</small></div>
         <div class="cashflow-report-actions"><label class="cashflow-mode-control">View<select id="cashFlowMode"><option value="transactions">Transactions</option><option value="bank-endpoints">Account cash flow</option></select></label><button class="quiet-btn" id="saveViewBtn">＋ Save as view</button></div>
       </div>
+      <details class="card cashflow-exclusions" id="cashFlowExclusions">
+        <summary>Exclude transactions <span id="exclusionReportStatus"></span></summary>
+        <p class="exclusion-help">Rules match source transaction fields. Text comparisons are case-insensitive and literal; description includes both the displayed and original source descriptions. All conditions in one rule must match (AND); any matching rule excludes the transaction (OR). Transactions stay in the database, activity list, and net worth. Excluding a trade also excludes its reported fee.</p>
+        <div id="exclusionRules"></div>
+        <div class="exclusion-actions"><button class="quiet-btn" type="button" id="addExclusionRule">＋ Add exclusion rule (OR)</button><span id="exclusionDraftStatus"></span><button class="primary-btn" type="button" id="applyExclusions">Apply exclusions</button></div>
+        <details class="bank-internal-transfers" id="exclusionMatches" hidden><summary>Inspect transactions excluded by rules</summary><div class="sankey-table-scroll"><table><thead><tr><th>Date</th><th>Description</th><th>Account</th><th>Source category</th><th>Matched rules</th><th class="right">Source amount</th></tr></thead><tbody id="exclusionMatchRows"></tbody></table></div></details>
+      </details>
       <article class="card bank-endpoint-controls" id="bankEndpointControls" hidden>
         <div class="card-heading"><div><h2>Account endpoints</h2><p>Choose the accounts inside your reporting boundary. Include your bank and Robinhood to treat funding transfers as internal; trades within investment accounts are excluded. Leave credit cards unchecked to report bank payments rather than card purchases.</p></div><button class="quiet-btn" id="applyBankEndpoints">Apply endpoints</button></div>
         <div class="bank-endpoint-choices" id="bankEndpointChoices"></div>

@@ -7,7 +7,15 @@ const sourceDateLabel = (value,options={}) => {
   return new Intl.DateTimeFormat("en-US",{...options,timeZone:"UTC"}).format(new Date(Date.UTC(year,month-1,day,12)));
 };
 const state = {accounts:[],transactions:[],reportTransactions:null,paycheckMode:null,defaultPaycheckMode:"take-home",reporting:null,categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,closing_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
-Object.assign(state,{cashFlowConfiguration:null,defaultCashFlowConfiguration:{mode:"transactions",endpoint_account_ids:[]},cashFlowReport:null,cashFlowAccounts:[],effectiveEndpoints:[]});
+Object.assign(state,{cashFlowConfiguration:null,defaultCashFlowConfiguration:{mode:"transactions",endpoint_account_ids:[]},cashFlowReport:null,cashFlowTransactionReport:null,cashFlowAccounts:[],effectiveEndpoints:[],exclusionDraft:null,exclusionDirty:false});
+const exclusionTextOperators=["contains","not_contains","eq","neq","starts_with","ends_with"],exclusionOrderedOperators=["eq","neq","lt","lte","gt","gte"];
+const exclusionFields={
+  description:{label:"Description",type:"text",operators:exclusionTextOperators},note:{label:"Note / memo",type:"text",operators:exclusionTextOperators},
+  institution:{label:"Institution",type:"text",operators:exclusionTextOperators},category:{label:"Category",type:"category",operators:["eq","neq"]},
+  category_group:{label:"Category group",type:"group",operators:["eq","neq"]},account_id:{label:"Account",type:"account",operators:["eq","neq"]},
+  amount:{label:"Signed amount",type:"number",operators:exclusionOrderedOperators},absolute_amount:{label:"Absolute amount",type:"number",operators:exclusionOrderedOperators},date:{label:"Date",type:"date",operators:exclusionOrderedOperators}
+};
+const exclusionOperatorLabels={contains:"contains",not_contains:"does not contain",eq:"equals",neq:"does not equal",starts_with:"starts with",ends_with:"ends with",lt:"is less than / before",lte:"is at most / on or before",gt:"is greater than / after",gte:"is at least / on or after"};
 const colors=["#e97567","#6d5dfc","#e6a04b","#28a792","#9f938c","#60a5c5","#d577aa"];
 const csvMappingFields=[
   {key:"date",label:"Date",required:true,aliases:["date","transaction date","posted date","posting date"]},
@@ -95,7 +103,8 @@ function queryString() {
 
 async function load(initial=false) {
   const [data,netWorth]=await Promise.all([
-    initial?request(`/api/bootstrap?${queryString()}`):request(`/api/transactions?${queryString()}`),
+    state.cashFlowConfiguration?request("/api/reports/transactions",{method:"POST",body:JSON.stringify({configuration:currentReportConfiguration(),bootstrap:initial})})
+      :request(initial?`/api/bootstrap?${queryString()}`:`/api/transactions?${queryString()}`),
     request(`/api/net-worth?${queryString()}`)
   ]);
   if(initial){state.accounts=data.accounts;state.categories=data.categories;state.categoryGroups=data.category_groups||[];state.views=data.views||[];buildFilterOptions();renderAccounts();renderSavedViews();}
@@ -106,7 +115,7 @@ async function load(initial=false) {
   if(data.cash_flow){
     state.cashFlowConfiguration=data.cash_flow.configuration;
     state.defaultCashFlowConfiguration=data.cash_flow.default_configuration;
-    state.cashFlowReport=data.cash_flow.report;state.cashFlowAccounts=data.cash_flow.accounts;
+    state.cashFlowReport=data.cash_flow.report;state.cashFlowTransactionReport=data.cash_flow.transaction_report||null;state.cashFlowAccounts=data.cash_flow.accounts;
     state.effectiveEndpoints=data.cash_flow.effective_endpoint_account_ids;
     renderBankEndpointChoices();
   }
@@ -127,7 +136,9 @@ function currentReportConfiguration(){
 
 function applyReportConfiguration(configuration,{rebuild=true}={}){
   state.paycheckMode=configuration?.paycheck_mode==="full-paycheck"?"full-paycheck":"take-home";
-  state.cashFlowConfiguration={mode:configuration?.cash_flow?.mode==="bank-endpoints"?"bank-endpoints":"transactions",endpoint_account_ids:[...(configuration?.cash_flow?.endpoint_account_ids||[])]};
+  state.cashFlowConfiguration={mode:configuration?.cash_flow?.mode==="bank-endpoints"?"bank-endpoints":"transactions",endpoint_account_ids:[...(configuration?.cash_flow?.endpoint_account_ids||[])],
+    ...(configuration?.cash_flow?.exclusions?.length?{exclusions:JSON.parse(JSON.stringify(configuration.cash_flow.exclusions))}:{})};
+  state.exclusionDraft=null;state.exclusionDirty=false;
   const filters=configuration?.filters||{};
   if(["month","quarter","year","all"].includes(filters.range)) setRange(filters.range);
   else{
@@ -181,7 +192,8 @@ function reportSettingsSummary(){
     ["Month focus",filter.month?cashFlowMonthLabel(filter.month):"All months in range"],
     ["Accounts",accountNames.length?accountNames.join(", "):"All accounts"],
     ["Categories",filter.categories.length?`${filter.categories.length} selected`:"All categories"],
-    ["Search",filter.search||"Any description"]
+    ["Search",filter.search||"Any description"],
+    ["Exclusions",`${(state.cashFlowConfiguration?.exclusions||[]).filter(rule=>rule.enabled!==false).length} enabled rules`]
   ];
   $("#reportSettingsSummary").innerHTML=rows.map(([label,value])=>`<div class="report-setting-row"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
 }
@@ -468,9 +480,48 @@ function transactionClass(transaction){
   const group=transaction.category_group||groupForCategory(transaction.category);return group==="Income"?"income":group==="Transfers"?"transfer":"expense";
 }
 function bankEndpointMode(){return state.cashFlowConfiguration?.mode==="bank-endpoints"}
-function cashFlowSummary(){return bankEndpointMode()?(state.cashFlowReport?.summary||{totals:{income:0,expense:0,net:0},months:[]}):state.summary}
+function cashFlowSummary(){return bankEndpointMode()?(state.cashFlowReport?.summary||{totals:{income:0,expense:0,net:0},months:[]}):state.cashFlowTransactionReport?.summary||state.summary}
 function cashFlowGroup(transaction){return bankEndpointMode()?transaction.endpoint_name:(transaction.category_group||groupForCategory(transaction.category))}
 function emptyCashFlowMessage(){return bankEndpointMode()?state.cashFlowConfiguration.endpoint_account_ids.length?"No cash movements in this range":"Choose endpoint accounts above to inspect account cash flow":"No income or expenses in this range"}
+
+function renderExclusionEditor(){
+  if(!state.exclusionDirty||!state.exclusionDraft)state.exclusionDraft=JSON.parse(JSON.stringify(state.cashFlowConfiguration?.exclusions||[]));
+  const options=(values,current)=>values.map(([value,label])=>`<option value="${escapeHtml(value)}" ${String(value)===String(current)?"selected":""}>${escapeHtml(label)}</option>`).join("");
+  $("#exclusionRules").innerHTML=state.exclusionDraft.map((rule,index)=>`<section class="exclusion-rule" data-rule-index="${index}">
+    <div class="exclusion-rule-heading"><label class="exclusion-enable"><input type="checkbox" data-exclusion-property="enabled" ${rule.enabled!==false?"checked":""}>Enabled</label><input class="exclusion-rule-name" data-exclusion-property="name" maxlength="80" aria-label="Name of exclusion rule ${index+1}" value="${escapeHtml(rule.name||"")}" placeholder="Rule ${index+1}"><button class="text-btn" type="button" data-exclusion-action="remove-rule">Remove rule</button></div>
+    <p>Exclude when all these conditions match:</p>${rule.conditions.map((condition,conditionIndex)=>{
+      const definition=exclusionFields[condition.field]||exclusionFields.description;
+      const values=definition.type==="account"?state.accounts.map(account=>[account.id,`${account.name} · ${account.institution}`])
+        :definition.type==="category"?state.categories.map(category=>[category,category]):definition.type==="group"?state.categoryGroups.map(group=>[group.name,group.name]):null;
+      if(values&&condition.value!==""&&!values.some(([value])=>String(value)===String(condition.value)))values.push([condition.value,String(condition.value)]);
+      const value=values?`<select data-exclusion-property="value" aria-label="Value for rule ${index+1} condition ${conditionIndex+1}"><option value="">Choose a value</option>${options(values,condition.value)}</select>`
+        :`<input data-exclusion-property="value" type="${definition.type==="number"?"number":definition.type==="date"?"date":"text"}" ${definition.type==="number"?'step="any"':'maxlength="500"'} value="${escapeHtml(condition.value??"")}" aria-label="Value for rule ${index+1} condition ${conditionIndex+1}" placeholder="${condition.field==="description"?"e.g. Example Merchant":definition.type==="number"?"0":"Value"}">`;
+      return `<div class="exclusion-condition" data-condition-index="${conditionIndex}"><select data-exclusion-property="field" aria-label="Field for rule ${index+1} condition ${conditionIndex+1}">${options(Object.entries(exclusionFields).map(([key,field])=>[key,field.label]),condition.field)}</select><select data-exclusion-property="operator" aria-label="Comparison for rule ${index+1} condition ${conditionIndex+1}">${options(definition.operators.map(operator=>[operator,exclusionOperatorLabels[operator]]),condition.operator)}</select>${value}<button class="text-btn" type="button" data-exclusion-action="remove-condition" ${rule.conditions.length===1?"disabled":""} aria-label="Remove condition">×</button></div>`;
+    }).join("")}<button class="text-btn" type="button" data-exclusion-action="add-condition">＋ Add condition (AND)</button></section>`).join("")||`<p class="exclusion-empty">No exclusion rules. Add a rule to leave matching transactions out of this cash-flow report.</p>`;
+  $("#exclusionDraftStatus").textContent=state.exclusionDirty?"Unsaved changes":"Rules are applied to this cash-flow report only.";
+}
+
+function updateExclusionDraft(ruleIndex,conditionIndex,property,value){
+  const rule=state.exclusionDraft?.[ruleIndex];if(!rule)return;
+  if(conditionIndex===null){rule[property]=value}
+  else{
+    const condition=rule.conditions[conditionIndex];if(!condition)return;
+    if(property==="field"){
+      condition.field=value;condition.operator=exclusionFields[value].operators[0];condition.value="";
+    }else condition[property]=property==="value"&&["amount","absolute_amount","account_id"].includes(condition.field)&&value!==""?Number(value):value;
+  }
+  state.exclusionDirty=true;$("#exclusionDraftStatus").textContent="Unsaved changes";
+}
+
+function renderCashFlowExclusions(){
+  renderExclusionEditor();
+  const report=bankEndpointMode()?state.cashFlowReport:state.cashFlowTransactionReport;
+  const rows=(report?.excluded_transactions||[]).filter(row=>!state.cashFlowMonthSelection||row.date.slice(0,7)===state.cashFlowMonthSelection);
+  const enabled=(state.cashFlowConfiguration?.exclusions||[]).filter(rule=>rule.enabled!==false).length;
+  $("#exclusionReportStatus").textContent=`${enabled} enabled rule${enabled===1?"":"s"} · ${rows.length} transaction${rows.length===1?"":"s"} excluded under the active filters${state.cashFlowMonthSelection?" and month":""}`;
+  $("#exclusionMatches").hidden=!rows.length;
+  $("#exclusionMatchRows").innerHTML=rows.map(row=>`<tr><td>${sourceDateLabel(row.date,{month:"short",day:"numeric",year:"numeric"})}</td><td><strong>${escapeHtml(row.merchant)}</strong>${row.report_description&&row.report_description!==row.merchant?`<small>${escapeHtml(row.report_description)}</small>`:""}</td><td>${escapeHtml(row.account_name)}</td><td>${escapeHtml(row.original_category||row.category)}</td><td>${(row.excluded_by||[]).map(escapeHtml).join(" · ")}</td><td class="right">${fmt(row.amount)}</td></tr>`).join("");
+}
 
 function renderBankEndpointChoices(){
   const selected=new Set(state.cashFlowConfiguration?.endpoint_account_ids||[]);
@@ -513,7 +564,7 @@ function reportAdjustmentNote(transaction){
 
 function cashFlowTransactions(){
   const month=state.cashFlowMonthSelection;
-  const rows=bankEndpointMode()?(state.cashFlowReport?.transactions||[]):state.reportTransactions||state.transactions;
+  const rows=bankEndpointMode()?(state.cashFlowReport?.transactions||[]):state.cashFlowTransactionReport?.transactions||state.reportTransactions||state.transactions;
   return month?rows.filter(transaction=>transaction.date.slice(0,7)===month):rows;
 }
 
@@ -557,7 +608,7 @@ function renderCashFlow(){
   $("#cashflowRate").textContent=`${rate.toFixed(1)}%`;
   $("#cashflowRate").classList.toggle("negative",rate<0);
   $("#cashflowIncomeLabel").textContent=selectedMonth?`For ${cashFlowMonthLabel(selectedMonth.month)} · active filters applied`:"For the active date range";
-  renderBankEndpointReport();renderReportContext();
+  renderBankEndpointReport();renderCashFlowExclusions();renderReportContext();
   renderCashFlowBars();renderCashFlowMonthDetails();renderSankey();renderSankeyDetails();
 }
 
@@ -1028,10 +1079,42 @@ function switchSection(section,{push=true,preserveView=false}={}){
 
 function bind(){
   const saveCashFlow=async configuration=>{
-    const saved=await request("/api/settings/cash-flow",{method:"PUT",body:JSON.stringify(configuration)});
+    const saved=await request("/api/settings/cash-flow",{method:"PUT",body:JSON.stringify({...configuration,exclusions:configuration.exclusions||[]})});
     state.cashFlowConfiguration=saved;state.defaultCashFlowConfiguration=saved;
     detachSavedView();state.sankeySelection=null;
     await load();
+  };
+  $("#addExclusionRule").onclick=()=>{
+    state.exclusionDraft||=[];
+    if(state.exclusionDraft.length>=30)return toast("Use at most 30 exclusion rules");
+    state.exclusionDraft.push({name:"",enabled:true,conditions:[{field:"description",operator:"contains",value:""}]});
+    state.exclusionDirty=true;$("#cashFlowExclusions").open=true;renderExclusionEditor();
+  };
+  const editExclusion=event=>{
+    const property=event.target.dataset.exclusionProperty;if(!property)return;
+    const rule=event.target.closest("[data-rule-index]"),condition=event.target.closest("[data-condition-index]");if(!rule)return;
+    updateExclusionDraft(Number(rule.dataset.ruleIndex),condition?Number(condition.dataset.conditionIndex):null,property,property==="enabled"?event.target.checked:event.target.value);
+    if(property==="field")renderExclusionEditor();
+  };
+  $("#exclusionRules").oninput=editExclusion;
+  $("#exclusionRules").onchange=event=>{if(!["text","number","date"].includes(event.target.type))editExclusion(event)};
+  $("#exclusionRules").onclick=event=>{
+    const action=event.target.closest?.("[data-exclusion-action]");if(!action)return;
+    const element=action.closest("[data-rule-index]"),index=Number(element.dataset.ruleIndex),rule=state.exclusionDraft[index];
+    if(action.dataset.exclusionAction==="remove-rule")state.exclusionDraft.splice(index,1);
+    if(action.dataset.exclusionAction==="add-condition"){
+      if(rule.conditions.length>=10)return toast("Use at most 10 conditions per rule");
+      rule.conditions.push({field:"description",operator:"contains",value:""});
+    }
+    if(action.dataset.exclusionAction==="remove-condition"&&rule.conditions.length>1)rule.conditions.splice(Number(action.closest("[data-condition-index]").dataset.conditionIndex),1);
+    state.exclusionDirty=true;renderExclusionEditor();
+  };
+  $("#applyExclusions").onclick=async event=>{
+    const button=event.currentTarget;button.disabled=true;
+    try{
+      await saveCashFlow({...state.cashFlowConfiguration,exclusions:state.exclusionDraft||[]});
+      state.exclusionDirty=false;state.exclusionDraft=null;renderExclusionEditor();toast("Report exclusions saved");
+    }catch(error){toast(error.message)}finally{button.disabled=false}
   };
   $("#cashFlowMode").onchange=async event=>{
     const select=event.currentTarget,previous=state.cashFlowConfiguration;
@@ -1146,7 +1229,7 @@ function bind(){
   $("#resetFilters").onclick=async()=>{detachSavedView();applyDefaultReportConfiguration();closePanel();await load()};
   $("#clearFiltersBtn").onclick=()=>$("#resetFilters").click();
   let searchTimer;$("#searchInput").oninput=e=>{clearTimeout(searchTimer);searchTimer=setTimeout(async()=>{detachSavedView();state.filters.search=e.target.value.trim();await load()},250)};
-  $("#saveViewBtn").onclick=()=>{reportSettingsSummary();$("#viewName").value="";$("#saveViewDialog").showModal();$("#viewName").focus()};
+  $("#saveViewBtn").onclick=()=>{if(state.exclusionDirty)return toast("Apply your exclusion changes before saving a view");reportSettingsSummary();$("#viewName").value="";$("#saveViewDialog").showModal();$("#viewName").focus()};
   $("#saveViewForm").onsubmit=async event=>{
     if(event.submitter?.value==="cancel")return;
     event.preventDefault();

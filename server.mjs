@@ -8,6 +8,7 @@ import { encode as encodeToon } from "@toon-format/toon";
 import { createSyncLock } from "./lib/sync-lock.mjs";
 import { PAYCHECK_MODES, normalizePaycheckReporting, isContribution, projectPaycheckTransactions } from "./lib/paycheck-reporting.mjs";
 import { CASH_FLOW_MODES, ENDPOINT_ACCOUNT_TYPES, normalizeCashFlowConfiguration, bankCashFlowReport } from "./lib/bank-cash-flow.mjs";
+import { normalizeExclusionRules, exclusionMatcher } from "./lib/report-exclusions.mjs";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 try { loadEnvFile(join(ROOT, ".env")); } catch (error) {
@@ -243,26 +244,44 @@ function cashFlowConfiguration() {
   catch{return normalizeCashFlowConfiguration()}
 }
 
-function cashFlowReport(params) {
+function cashFlowReport(params,override=null,visibleRows=[]) {
   const defaults=cashFlowConfiguration();
   const configuration=normalizeCashFlowConfiguration({
     mode:params.get("cash_flow_mode")||defaults.mode,
-    endpoint_account_ids:params.has("endpoints")?params.get("endpoints").split(","):defaults.endpoint_account_ids
+    endpoint_account_ids:params.has("endpoints")?params.get("endpoints").split(","):defaults.endpoint_account_ids,
+    exclusions:defaults.exclusions,
+    ...(override?{...override,exclusions:override.exclusions||[]}:{})
   });
   const accounts=db.prepare("SELECT id,institution,COALESCE(NULLIF(nickname,''),name) name,type FROM accounts ORDER BY id").all()
     .filter(account=>ENDPOINT_ACCOUNT_TYPES.has(account.type));
   const filteredAccountIds=params.get("accounts")?new Set(params.get("accounts").split(",").filter(Boolean).map(Number)):null;
   const endpoints=accounts.filter(account=>configuration.endpoint_account_ids.includes(account.id)&&(!filteredAccountIds||filteredAccountIds.has(account.id)));
-  let report=null;
+  const activeExclusions=configuration.exclusions?.some(rule=>rule.enabled);
+  let report=null,transaction_report=null;
   if(configuration.mode==="bank-endpoints"){
     // Load peer context before date/category/search filtering: an internal
     // transfer can post on opposite sides of a month boundary.
-    const context=endpoints.length?listTransactions(new URLSearchParams({accounts:accounts.map(account=>account.id).join(",")}),{investmentEvidence:true}):[];
+    const context=endpoints.length?listTransactions(new URLSearchParams({accounts:accounts.map(account=>account.id).join(",")}),{investmentEvidence:true,exclusionEvidence:Boolean(activeExclusions)}):[];
     report=bankCashFlowReport(context,endpoints,{
-      from:params.get("from"),to:params.get("to"),categories:(params.get("categories")||"").split(",").filter(Boolean),search:params.get("search")
+      from:params.get("from"),to:params.get("to"),categories:(params.get("categories")||"").split(",").filter(Boolean),search:params.get("search"),exclusions:configuration.exclusions
     });
+  }else if(activeExclusions){
+    const sourceParams=new URLSearchParams(params);
+    sourceParams.delete("categories");sourceParams.delete("search");
+    const source=listTransactions(sourceParams,{investmentEvidence:true,exclusionEvidence:true});
+    const paycheck=paycheckReportingConfiguration();
+    const mode=PAYCHECK_MODES.has(params.get("paycheck_mode"))?params.get("paycheck_mode"):paycheck.paycheck_mode;
+    const projected=projectPaycheckTransactions(source,paycheck,mode);
+    const visibleIds=new Set(visibleRows.map(row=>row.id));
+    const rows=[],excluded_transactions=[],excludedBy=exclusionMatcher(configuration.exclusions);
+    projected.forEach((row,index)=>{
+      if(!visibleIds.has(row.id))return;
+      const reasons=excludedBy(source[index]);
+      if(reasons.length)excluded_transactions.push({...row,excluded_by:reasons});else rows.push(row);
+    });
+    transaction_report={transactions:rows,excluded_transactions,summary:summary(rows)};
   }
-  return {configuration,default_configuration:defaults,accounts,effective_endpoint_account_ids:endpoints.map(account=>account.id),report};
+  return {configuration,default_configuration:defaults,accounts,effective_endpoint_account_ids:endpoints.map(account=>account.id),report,transaction_report};
 }
 
 function paycheckReportingSettings() {
@@ -1416,7 +1435,7 @@ function startPlaidSync(itemId) {
   return {item_id:itemId,pending:true,already_running:false};
 }
 
-function listTransactions(params,{investmentEvidence=false}={}) {
+function listTransactions(params,{investmentEvidence=false,exclusionEvidence=false}={}) {
   const clauses = ["1=1"], values = [];
   if (params.get("from")) { clauses.push("t.date >= ?"); values.push(params.get("from")); }
   if (params.get("to")) { clauses.push("t.date <= ?"); values.push(params.get("to")); }
@@ -1441,13 +1460,14 @@ function listTransactions(params,{investmentEvidence=false}={}) {
     ORDER BY t.date DESC, t.id DESC
   `).all(...values).map(transaction => {
     const {original_details_json,...publicTransaction}=transaction;
-    const evidence=investmentEvidence?transactionEvidence(transaction):null;
+    const evidence=investmentEvidence||exclusionEvidence?transactionEvidence(transaction):null;
     return {...publicTransaction,has_original_details:Boolean(original_details_json),category_group:categoryGroupFor(transaction.category),
-      ...(investmentEvidence?{investment_action:evidence.investment_action,investment_subtype:evidence.investment_subtype,investment_fees:evidence.fees}:{})};
+      ...(investmentEvidence?{investment_action:evidence.investment_action,investment_subtype:evidence.investment_subtype,investment_fees:evidence.fees}:{}),
+      ...(exclusionEvidence?{report_description:evidence.description,report_memo:evidence.memo}:{})};
   });
 }
 
-function transactionReport(params) {
+function transactionReport(params,{cashFlowOverride=null}={}) {
   const configuration=paycheckReportingConfiguration();
   const mode=PAYCHECK_MODES.has(params.get("paycheck_mode"))?params.get("paycheck_mode"):configuration.paycheck_mode;
   const transactions=listTransactions(params);
@@ -1463,7 +1483,7 @@ function transactionReport(params) {
     rows=rows.filter(row=>(!categories.length||categories.includes(row.category))&&(!search||[row.merchant,row.category,row.note].some(value=>String(value||"").toLocaleLowerCase("en-US").includes(search))));
   }
   const contributions=rows.filter(row=>row.report_adjustment==="payroll_contribution");
-  return {transactions,report_transactions:rows,summary:summary(rows),cash_flow:cashFlowReport(params),reporting:{
+  return {transactions,report_transactions:rows,summary:summary(rows),cash_flow:cashFlowReport(params,cashFlowOverride,rows),reporting:{
     mode,default_mode:configuration.paycheck_mode,
     contribution_account_ids:configuration.contribution_account_ids,
     plan_account_ids:configuration.plan_account_ids,
@@ -1941,16 +1961,31 @@ function unlinkAndDeleteTransactions(records){
   return db.prepare(`DELETE FROM transactions WHERE id IN (${placeholders})`).run(...ids).changes;
 }
 
-async function api(req, res, url) {
-  if (req.method === "GET" && url.pathname === "/api/bootstrap") {
+function bootstrapReport(params,options={}) {
     const accounts = db.prepare(`
       SELECT a.*, p.status plaid_status, p.error_code plaid_error_code, p.last_sync plaid_last_sync
       FROM accounts a LEFT JOIN plaid_items p ON p.id=a.plaid_item_id ORDER BY a.id
     `).all().map(accountForClient);
-    const report = transactionReport(url.searchParams);
+    const report = transactionReport(params,options);
     const dbCategories = db.prepare("SELECT DISTINCT category FROM transactions ORDER BY category").all();
     const categories = [...new Set([...MONARCH_CATEGORIES, ...dbCategories.map(row=>row.category)])];
-    return json(res, {accounts, ...report, categories, category_groups:categoryTaxonomy(dbCategories), views:listReportViews()});
+    return {accounts, ...report, categories, category_groups:categoryTaxonomy(dbCategories), views:listReportViews()};
+}
+
+async function api(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/api/bootstrap") {
+    return json(res,bootstrapReport(url.searchParams));
+  }
+  if (req.method === "POST" && url.pathname === "/api/reports/transactions") {
+    const value=await body(req);
+    try{normalizeExclusionRules(value.configuration?.cash_flow?.exclusions,{strict:true})}
+    catch(error){return json(res,{error:error.message},400)}
+    const configuration=normalizeReportConfiguration(value.configuration),params=new URLSearchParams();
+    for(const key of ["from","to","search"])if(configuration.filters[key])params.set(key,configuration.filters[key]);
+    for(const key of ["accounts","categories"])if(configuration.filters[key].length)params.set(key,configuration.filters[key].join(","));
+    if(configuration.paycheck_mode)params.set("paycheck_mode",configuration.paycheck_mode);
+    const options={cashFlowOverride:configuration.cash_flow||normalizeCashFlowConfiguration()};
+    return json(res,value.bootstrap===true?bootstrapReport(params,options):transactionReport(params,options));
   }
   if (req.method === "GET" && url.pathname === "/api/settings") {
     return json(res,publicSettings());
@@ -1960,6 +1995,8 @@ async function api(req, res, url) {
     if(value.mode!==undefined&&!CASH_FLOW_MODES.has(value.mode))return json(res,{error:"Choose transaction or account-endpoint cash flow."},400);
     if(value.endpoint_account_ids!==undefined&&(!Array.isArray(value.endpoint_account_ids)||value.endpoint_account_ids.some(id=>!Number.isInteger(id)||id<=0)))
       return json(res,{error:"Endpoint accounts must be a list of account IDs."},400);
+    try{normalizeExclusionRules(value.exclusions,{strict:true})}
+    catch(error){return json(res,{error:error.message},400)}
     const configuration=normalizeCashFlowConfiguration({...cashFlowConfiguration(),...value});
     const eligible=new Set(db.prepare("SELECT id,type FROM accounts").all().filter(account=>ENDPOINT_ACCOUNT_TYPES.has(account.type)).map(account=>account.id));
     if(configuration.endpoint_account_ids.some(id=>!eligible.has(id)))return json(res,{error:"Choose existing accounts as endpoints."},400);
@@ -2028,6 +2065,8 @@ async function api(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/views") {
     const value = await body(req);
+    try{normalizeExclusionRules(value.configuration?.cash_flow?.exclusions,{strict:true})}
+    catch(error){return json(res,{error:error.message},400)}
     const name = String(value.name || "").trim().slice(0,80);
     if (!name) return json(res,{error:"A report view name is required"},400);
     const configuration = normalizeReportConfiguration(value.configuration);
