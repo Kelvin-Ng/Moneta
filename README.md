@@ -67,11 +67,15 @@ This mode measures cash crossing the selected account boundary:
   applies only to the regular transaction-based report.
 - Reciprocally paired **Transfer** entries between selected endpoints are excluded
   from headline totals. The links must connect different accounts, have opposite
-  amounts, and post within four days. Both entries must be posted and categorized
+  amounts, and post within seven calendar days. Both entries must be posted and categorized
   Transfer, or Transfer/Credit Card Payment when a selected card is involved.
   Peer context is checked outside the visible date/category/search
   filters, including across month boundaries. The exclusion list remains available
-  to inspect; categories and pairing metadata are never rewritten.
+  to inspect; categories and pairing metadata are never rewritten by reporting.
+- Automatic matching links only posted, non-trade transfers where each entry has
+  exactly one eligible counterpart in the seven-day window. Repeated amounts with
+  multiple possible matches are left unmatched rather than guessed. Existing links
+  are preserved. Matching never changes categories or AI-protection settings.
 - Transfers to an account outside the selected boundary count as cash crossing
   that boundary. Unpaired Transfer entries remain included and are called out;
   equal amounts alone are not grounds to discard a movement.

@@ -208,9 +208,9 @@ test("transfer matching only links transactions and preserves categories, metada
 
     const first=await fetch(`http://localhost:${port}/api/detect-transfers`,{method:"POST"});
     assert.equal(first.status,200);
-    assert.equal((await first.json()).matched,3);
+    assert.equal((await first.json()).matched,1);
     assert.deepEqual(withoutPair(rows()),original);
-    assert.deepEqual(rows().map(row=>row.transfer_pair_id),[ids[1],ids[0],ids[3],ids[2],ids[5],ids[4]]);
+    assert.deepEqual(rows().map(row=>row.transfer_pair_id),[ids[1],ids[0],null,null,null,null]);
     const report=await (await fetch(`http://localhost:${port}/api/transactions?accounts=${accountIds.join(",")}`)).json();
     assert.equal(report.summary.totals.income,33003.57);
     assert.equal(report.summary.totals.expense,33003.57);
@@ -219,7 +219,7 @@ test("transfer matching only links transactions and preserves categories, metada
 
     // A user can change an already-paired transaction without the next match
     // resetting its category or categorization metadata.
-    const edited=await fetch(`http://localhost:${port}/api/transactions/${ids[2]}`,{
+    const edited=await fetch(`http://localhost:${port}/api/transactions/${ids[0]}`,{
       method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({category:"Personal"})
     });
     assert.equal(edited.status,200);
@@ -228,8 +228,61 @@ test("transfer matching only links transactions and preserves categories, metada
     assert.equal(second.status,200);
     assert.equal((await second.json()).matched,0);
     assert.deepEqual(rows(),afterEdit);
-    assert.equal(rows().find(transaction=>transaction.id===ids[2]).category,"Personal");
+    assert.equal(rows().find(transaction=>transaction.id===ids[0]).category,"Personal");
   } finally {
+    for(const id of accountIds)await fetch(`http://localhost:${port}/api/accounts/${id}`,{method:"DELETE"});
+    database.close();
+  }
+});
+
+test("matching persists only mutually unique posted transfers and excludes cross-month pairs from each report",async()=>{
+  const database=new DatabaseSync(join(temp,"test.db"));
+  const accountIds=[];
+  try{
+    for(const type of ["checking","investment"]){
+      accountIds.push(Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES('Delayed Transfer Test',?,?)")
+        .run(`Delayed ${type}`,type).lastInsertRowid));
+    }
+    const fixtures=[
+      [0,"2026-03-27",-2390.37], [1,"2026-04-01",2390.37],
+      [0,"2026-10-09",-6412.11], [1,"2026-10-15",6412.11],
+      [0,"2026-10-01",-77123.45], [1,"2026-10-08",77123.45], // Seven days.
+      [0,"2026-10-01",-77234.56], [1,"2026-10-09",77234.56], // Eight days.
+      [0,"2026-10-01",-77345.67], [1,"2026-10-02",77345.67], [0,"2026-10-03",-77345.67], // Ambiguous.
+      [0,"2026-10-01",-77456.78], [1,"2026-10-02",77456.78,{pending:1}],
+      [0,"2026-10-01",-77567.89], [1,"2026-10-02",77567.89,{action:"buy"}], // Misclassified CSV trade.
+      [0,"2026-10-01",-77678.91,{category:"Balance Adjustments"}], [1,"2026-10-02",77678.91],
+      [0,"2026-10-01",-77789.12], [1,"2026-10-02",77789.12,{category:"Credit Card Payment"}] // No card account.
+    ];
+    const ids=fixtures.map(([account,date,amount,extra={}])=>Number(database.prepare(`INSERT INTO transactions(
+      account_id,date,merchant,category,amount,pending,category_source,categorization_status,
+      ai_categorization_disabled,original_details_json
+    ) VALUES(?,?,'Payment transfer test',?,?,?,'manual','categorized',1,?)`).run(
+      accountIds[account],date,extra.category||"Transfer",amount,extra.pending||0,
+      JSON.stringify({source:"csv",row:{investment_action:extra.action||"transfer"}})
+    ).lastInsertRowid));
+    const rows=()=>database.prepare("SELECT * FROM transactions WHERE account_id IN (?,?) ORDER BY id").all(...accountIds);
+    const withoutPair=rows=>rows.map(({transfer_pair_id,...row})=>row);
+    const original=withoutPair(rows());
+    const response=await fetch(`http://localhost:${port}/api/detect-transfers`,{method:"POST"});
+    assert.equal(response.status,200);
+    assert.equal((await response.json()).matched,3);
+    assert.deepEqual(rows().map(row=>row.transfer_pair_id),[
+      ids[1],ids[0],ids[3],ids[2],ids[5],ids[4],...Array(fixtures.length-6).fill(null)
+    ]);
+    assert.deepEqual(withoutPair(rows()),original);
+    const afterMatch=rows();
+    assert.equal((await (await fetch(`http://localhost:${port}/api/detect-transfers`,{method:"POST"})).json()).matched,0);
+    assert.deepEqual(rows(),afterMatch);
+    for(const [from,to,internalId] of [["2026-03-01","2026-03-31",ids[0]],["2026-04-01","2026-04-30",ids[1]]]){
+      const params=new URLSearchParams({cash_flow_mode:"bank-endpoints",endpoints:accountIds.join(","),accounts:accountIds.join(","),from,to});
+      const result=await (await fetch(`http://localhost:${port}/api/transactions?${params}`)).json();
+      assert.deepEqual(result.cash_flow.report.summary.totals,{income:0,expense:0,net:0});
+      assert.deepEqual(result.cash_flow.report.internal_transfers.map(row=>row.id),[internalId]);
+      assert.equal(result.cash_flow.report.transactions.length,0);
+    }
+    assert.deepEqual(rows(),afterMatch);
+  }finally{
     for(const id of accountIds)await fetch(`http://localhost:${port}/api/accounts/${id}`,{method:"DELETE"});
     database.close();
   }

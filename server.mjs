@@ -9,6 +9,7 @@ import { createSyncLock } from "./lib/sync-lock.mjs";
 import { PAYCHECK_MODES, normalizePaycheckReporting, isContribution, projectPaycheckTransactions } from "./lib/paycheck-reporting.mjs";
 import { CASH_FLOW_MODES, ENDPOINT_ACCOUNT_TYPES, normalizeCashFlowConfiguration, bankCashFlowReport } from "./lib/bank-cash-flow.mjs";
 import { normalizeExclusionRules, exclusionMatcher } from "./lib/report-exclusions.mjs";
+import { findTransferPairs } from "./lib/transfer-matching.mjs";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 try { loadEnvFile(join(ROOT, ".env")); } catch (error) {
@@ -2358,24 +2359,26 @@ async function api(req, res, url) {
 
 function detectTransfers() {
   // Pairing is reconciliation metadata only. Categories and their provenance
-  // belong to the categorizer or user; reports classify by category group.
-  const transferCategories=MONARCH_CATEGORY_GROUPS.find(group=>group.name==="Transfers").categories;
-  const candidates=db.prepare(`
-    SELECT t.* FROM transactions t WHERE t.transfer_pair_id IS NULL
-      AND (t.category IN (${transferCategories.map(()=>"?").join(",")}) OR lower(t.category) LIKE '%payment%' OR lower(t.merchant) LIKE '%payment%')
-    ORDER BY t.date
-  `).all(...transferCategories);
-  let matched=0;
-  for (let i=0;i<candidates.length;i++) for(let j=i+1;j<candidates.length;j++) {
-    const a=candidates[i], b=candidates[j];
-    const days=Math.abs((new Date(a.date)-new Date(b.date))/86400000);
-    if (a.account_id!==b.account_id && days<=4 && Math.abs(a.amount+b.amount)<0.01 && !a.transfer_pair_id && !b.transfer_pair_id) {
-      db.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(b.id,a.id);
-      db.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(a.id,b.id);
-      a.transfer_pair_id=b.id; b.transfer_pair_id=a.id; matched++;
-    }
+  // belong to the categorizer or user. Lock before reading so concurrent syncs
+  // cannot claim either side, and commit both reciprocal links atomically.
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const accounts=db.prepare("SELECT id,type FROM accounts").all();
+    const candidates=db.prepare(`SELECT t.*,l.type investment_action
+      FROM transactions t LEFT JOIN investment_ledger l
+        ON l.external_id=t.external_id AND l.account_id=t.account_id
+      WHERE t.transfer_pair_id IS NULL AND t.pending=0
+        AND t.category IN ('Transfer','Credit Card Payment')
+    `).all().map(row=>({...row,investment_action:transactionEvidence(row).investment_action}));
+    const pairs=findTransferPairs(candidates,accounts);
+    const link=db.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?");
+    for(const [a,b] of pairs){link.run(b,a);link.run(a,b)}
+    db.exec("COMMIT");
+    return {matched:pairs.length};
+  } catch(error) {
+    db.exec("ROLLBACK");
+    throw error;
   }
-  return {matched};
 }
 
 const mime={".html":"text/html; charset=utf-8",".css":"text/css; charset=utf-8",".js":"text/javascript; charset=utf-8",".svg":"image/svg+xml"};
