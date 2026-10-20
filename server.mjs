@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { encode as encodeToon } from "@toon-format/toon";
 import { createSyncLock } from "./lib/sync-lock.mjs";
 import { PAYCHECK_MODES, normalizePaycheckReporting, isContribution, projectPaycheckTransactions } from "./lib/paycheck-reporting.mjs";
+import { CASH_FLOW_MODES, ENDPOINT_ACCOUNT_TYPES, normalizeCashFlowConfiguration, bankCashFlowReport } from "./lib/bank-cash-flow.mjs";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 try { loadEnvFile(join(ROOT, ".env")); } catch (error) {
@@ -235,6 +236,33 @@ let categorizationProgress={running:false,requested:0,processed:0,categorized:0,
 function paycheckReportingConfiguration() {
   try { return normalizePaycheckReporting(JSON.parse(getSetting("paycheck_reporting") || "{}")); }
   catch { return normalizePaycheckReporting(); }
+}
+
+function cashFlowConfiguration() {
+  try{return normalizeCashFlowConfiguration(JSON.parse(getSetting("cash_flow_reporting")||"{}"))}
+  catch{return normalizeCashFlowConfiguration()}
+}
+
+function cashFlowReport(params) {
+  const defaults=cashFlowConfiguration();
+  const configuration=normalizeCashFlowConfiguration({
+    mode:params.get("cash_flow_mode")||defaults.mode,
+    endpoint_account_ids:params.has("endpoints")?params.get("endpoints").split(","):defaults.endpoint_account_ids
+  });
+  const accounts=db.prepare("SELECT id,institution,COALESCE(NULLIF(nickname,''),name) name,type FROM accounts ORDER BY id").all()
+    .filter(account=>ENDPOINT_ACCOUNT_TYPES.has(account.type));
+  const filteredAccountIds=params.get("accounts")?new Set(params.get("accounts").split(",").filter(Boolean).map(Number)):null;
+  const endpoints=accounts.filter(account=>configuration.endpoint_account_ids.includes(account.id)&&(!filteredAccountIds||filteredAccountIds.has(account.id)));
+  let report=null;
+  if(configuration.mode==="bank-endpoints"){
+    // Load peer context before date/category/search filtering: an internal
+    // transfer can post on opposite sides of a month boundary.
+    const context=endpoints.length?listTransactions(new URLSearchParams({accounts:accounts.map(account=>account.id).join(",")}),{investmentEvidence:true}):[];
+    report=bankCashFlowReport(context,endpoints,{
+      from:params.get("from"),to:params.get("to"),categories:(params.get("categories")||"").split(",").filter(Boolean),search:params.get("search")
+    });
+  }
+  return {configuration,default_configuration:defaults,accounts,effective_endpoint_account_ids:endpoints.map(account=>account.id),report};
 }
 
 function paycheckReportingSettings() {
@@ -1057,6 +1085,11 @@ function removeAccount(accountId) {
       reporting.plan_account_ids=reporting.plan_account_ids.filter(id=>id!==accountId);
       saveSetting.run("paycheck_reporting",JSON.stringify(reporting));
     }
+    const cashFlow=cashFlowConfiguration();
+    if(cashFlow.endpoint_account_ids.includes(accountId)){
+      cashFlow.endpoint_account_ids=cashFlow.endpoint_account_ids.filter(id=>id!==accountId);
+      saveSetting.run("cash_flow_reporting",JSON.stringify(cashFlow));
+    }
     let disconnectedItem = false;
     if (account.plaid_item_id) {
       const remaining = db.prepare("SELECT COUNT(*) AS n FROM accounts WHERE plaid_item_id=?").get(account.plaid_item_id).n;
@@ -1401,7 +1434,7 @@ function listTransactions(params,{investmentEvidence=false}={}) {
   }
   return db.prepare(`
     SELECT t.*, COALESCE(NULLIF(a.nickname,''),a.name) account_name, a.institution, a.color account_color
-      ${investmentEvidence?", l.type investment_action, l.subtype investment_subtype":""}
+      ${investmentEvidence?", l.type investment_action, l.subtype investment_subtype, l.fees investment_fees":""}
     FROM transactions t JOIN accounts a ON a.id=t.account_id
     ${investmentEvidence?"LEFT JOIN investment_ledger l ON l.external_id=t.external_id AND l.account_id=t.account_id":""}
     WHERE ${clauses.join(" AND ")}
@@ -1410,7 +1443,7 @@ function listTransactions(params,{investmentEvidence=false}={}) {
     const {original_details_json,...publicTransaction}=transaction;
     const evidence=investmentEvidence?transactionEvidence(transaction):null;
     return {...publicTransaction,has_original_details:Boolean(original_details_json),category_group:categoryGroupFor(transaction.category),
-      ...(evidence?{investment_action:evidence.investment_action,investment_subtype:evidence.investment_subtype}:{})};
+      ...(investmentEvidence?{investment_action:evidence.investment_action,investment_subtype:evidence.investment_subtype,investment_fees:evidence.fees}:{})};
   });
 }
 
@@ -1430,7 +1463,7 @@ function transactionReport(params) {
     rows=rows.filter(row=>(!categories.length||categories.includes(row.category))&&(!search||[row.merchant,row.category,row.note].some(value=>String(value||"").toLocaleLowerCase("en-US").includes(search))));
   }
   const contributions=rows.filter(row=>row.report_adjustment==="payroll_contribution");
-  return {transactions,report_transactions:rows,summary:summary(rows),reporting:{
+  return {transactions,report_transactions:rows,summary:summary(rows),cash_flow:cashFlowReport(params),reporting:{
     mode,default_mode:configuration.paycheck_mode,
     contribution_account_ids:configuration.contribution_account_ids,
     plan_account_ids:configuration.plan_account_ids,
@@ -1481,6 +1514,7 @@ function normalizeReportConfiguration(value = {}) {
   return {
     version:1,
     ...(PAYCHECK_MODES.has(source.paycheck_mode)?{paycheck_mode:source.paycheck_mode}:{}),
+    ...(source.cash_flow&&typeof source.cash_flow==="object"?{cash_flow:normalizeCashFlowConfiguration(source.cash_flow)}:{}),
     filters:{
       range,
       from:date(filters.from),
@@ -1920,6 +1954,17 @@ async function api(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/settings") {
     return json(res,publicSettings());
+  }
+  if (req.method === "PUT" && url.pathname === "/api/settings/cash-flow") {
+    const value=await body(req);
+    if(value.mode!==undefined&&!CASH_FLOW_MODES.has(value.mode))return json(res,{error:"Choose transaction or account-endpoint cash flow."},400);
+    if(value.endpoint_account_ids!==undefined&&(!Array.isArray(value.endpoint_account_ids)||value.endpoint_account_ids.some(id=>!Number.isInteger(id)||id<=0)))
+      return json(res,{error:"Endpoint accounts must be a list of account IDs."},400);
+    const configuration=normalizeCashFlowConfiguration({...cashFlowConfiguration(),...value});
+    const eligible=new Set(db.prepare("SELECT id,type FROM accounts").all().filter(account=>ENDPOINT_ACCOUNT_TYPES.has(account.type)).map(account=>account.id));
+    if(configuration.endpoint_account_ids.some(id=>!eligible.has(id)))return json(res,{error:"Choose existing accounts as endpoints."},400);
+    saveSetting.run("cash_flow_reporting",JSON.stringify(configuration));
+    return json(res,configuration);
   }
   if (req.method === "PUT" && url.pathname === "/api/settings/paycheck-reporting") {
     const value=await body(req);

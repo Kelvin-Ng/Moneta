@@ -109,19 +109,27 @@
     <section class="view" id="cashflowView">
       <div class="report-view-bar">
         <div><p class="eyebrow" id="reportContextLabel">LIVE REPORT</p><strong id="reportContextName">Cash flow</strong><small id="reportContextDescription">Calculated from current data using the active report settings.</small></div>
-        <button class="quiet-btn" id="saveViewBtn">＋ Save as view</button>
+        <div class="cashflow-report-actions"><label class="cashflow-mode-control">View<select id="cashFlowMode"><option value="transactions">Transactions</option><option value="bank-endpoints">Account cash flow</option></select></label><button class="quiet-btn" id="saveViewBtn">＋ Save as view</button></div>
       </div>
+      <article class="card bank-endpoint-controls" id="bankEndpointControls" hidden>
+        <div class="card-heading"><div><h2>Account endpoints</h2><p>Choose the accounts inside your reporting boundary. Include your bank and Robinhood to treat funding transfers as internal; trades within investment accounts are excluded. Leave credit cards unchecked to report bank payments rather than card purchases.</p></div><button class="quiet-btn" id="applyBankEndpoints">Apply endpoints</button></div>
+        <div class="bank-endpoint-choices" id="bankEndpointChoices"></div>
+        <p class="bank-endpoint-note" id="bankEndpointNote" role="status"></p>
+        <div class="sankey-table-scroll"><table class="bank-endpoint-summary"><thead><tr><th>Endpoint account</th><th class="right">Cash inflow</th><th class="right">Cash outflow</th><th class="right">Internal transfer net</th><th class="right">Total cash movement</th></tr></thead><tbody id="bankEndpointSummary"></tbody></table></div>
+        <details class="bank-internal-transfers" id="bankInternalTransfers"><summary id="bankInternalTransfersLabel">Excluded internal transfers</summary><div class="sankey-table-scroll"><table><thead><tr><th>Date</th><th>Description</th><th>Account</th><th>Other endpoint</th><th class="right">Amount</th></tr></thead><tbody id="bankInternalTransferRows"></tbody></table></div></details>
+        <details class="bank-internal-transfers" id="endpointInvestmentActivity" hidden><summary id="endpointInvestmentActivityLabel">Excluded investment trades</summary><div class="sankey-table-scroll"><table><thead><tr><th>Date</th><th>Description</th><th>Account</th><th>Action</th><th class="right">Trade amount (excluded)</th></tr></thead><tbody id="endpointInvestmentActivityRows"></tbody></table></div></details>
+      </article>
       <div class="cashflow-kpis">
-        <article class="kpi"><div class="kpi-label"><i class="dot income"></i>Total income</div><div class="kpi-value" id="cashflowIncome">$0</div><div class="kpi-foot" id="cashflowIncomeLabel">For the active date range</div></article>
-        <article class="kpi"><div class="kpi-label"><i class="dot expense"></i>Total expenses</div><div class="kpi-value" id="cashflowExpense">$0</div><div class="kpi-foot">Card payments and transfers excluded</div></article>
+        <article class="kpi"><div class="kpi-label"><i class="dot income"></i><span id="cashflowIncomeTitle">Total income</span></div><div class="kpi-value" id="cashflowIncome">$0</div><div class="kpi-foot" id="cashflowIncomeLabel">For the active date range</div></article>
+        <article class="kpi"><div class="kpi-label"><i class="dot expense"></i><span id="cashflowExpenseTitle">Total expenses</span></div><div class="kpi-value" id="cashflowExpense">$0</div><div class="kpi-foot" id="cashflowExpenseLabel">Card payments and transfers excluded</div></article>
         <article class="kpi hero-kpi"><div class="kpi-label">Net cash flow</div><div class="kpi-value" id="cashflowNet">$0</div><div class="kpi-foot" id="cashflowNetLabel">Income minus expenses</div></article>
-        <article class="kpi"><div class="kpi-label">Savings rate</div><div class="kpi-value" id="cashflowRate">0%</div><div class="kpi-foot">Net cash flow ÷ income</div></article>
+        <article class="kpi"><div class="kpi-label" id="cashflowRateTitle">Savings rate</div><div class="kpi-value" id="cashflowRate">0%</div><div class="kpi-foot" id="cashflowRateLabel">Net cash flow ÷ income</div></article>
       </div>
 
       <article class="card cashflow-report-card">
         <div class="card-heading">
-          <div><h2>Income vs. expenses</h2><p>Monthly totals using the filters above</p></div>
-          <div class="legend"><span><i class="dot income"></i>Income</span><span><i class="dot expense"></i>Expenses</span><span><i class="legend-line net"></i>Net income</span></div>
+          <div><h2 id="cashflowBarTitle">Income vs. expenses</h2><p>Monthly totals using the filters above</p></div>
+          <div class="legend"><span><i class="dot income"></i><span id="cashflowLegendIncome">Income</span></span><span><i class="dot expense"></i><span id="cashflowLegendExpense">Expenses</span></span><span><i class="legend-line net"></i><span id="cashflowLegendNet">Net income</span></span></div>
         </div>
         <div class="cashflow-bar-wrap"><div class="cashflow-chart-scroll"><svg id="cashflowBarChart" role="img" aria-label="Monthly income, expense, and net-income chart"></svg></div><div class="cashflow-bar-tooltip" id="cashflowBarTooltip" role="status" hidden></div></div>
         <section class="sankey-details cashflow-month-details" id="cashflowMonthDetails" hidden>
@@ -133,11 +141,11 @@
 
       <article class="card cashflow-report-card sankey-card">
         <div class="card-heading">
-          <div><h2>Category flow</h2><p>Categories → Monarch groups → available cash → groups → categories</p></div>
+          <div><h2 id="cashflowSankeyTitle">Category flow</h2><p id="cashflowSankeyDescription">Categories → Monarch groups → available cash → groups → categories</p></div>
           <span class="report-note">Click a node or flow to see transactions</span>
         </div>
         <div class="cashflow-chart-scroll sankey-scroll"><svg id="cashflowSankey" role="img" aria-label="Cash flow Sankey diagram by category"></svg></div>
-        <p class="sankey-footnote">Transfers, credit-card payments, and investment trades are excluded. If spending exceeds income, Cash reserves represents the amount funded from existing balances.</p>
+        <p class="sankey-footnote" id="cashflowSankeyFootnote">Transfers, credit-card payments, and investment trades are excluded. If spending exceeds income, Cash reserves represents the amount funded from existing balances.</p>
         <section class="sankey-details" id="sankeyDetails" hidden>
           <div class="sankey-details-heading"><div><p class="eyebrow" id="sankeyDetailsType">SELECTED CATEGORY</p><h2 id="sankeyDetailsTitle">Transactions</h2><p id="sankeyDetailsSummary"></p></div></div>
           <div class="sankey-table-scroll" id="sankeyDetailsTable"><table><thead><tr><th>Date</th><th>Description</th><th>Group</th><th>Category</th><th>Account</th><th class="right">Amount</th></tr></thead><tbody id="sankeyDetailsRows"></tbody></table></div>

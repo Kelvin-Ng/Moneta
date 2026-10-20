@@ -805,6 +805,148 @@ test("paycheck reporting persists roles, projects before filtering, and leaves s
   }
 });
 
+test("bank endpoint mode persists its boundary, uses bank dates, and preserves the normal reports and ledger",async()=>{
+  const database=new DatabaseSync(join(temp,"test.db"));
+  database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000");
+  const base=`http://localhost:${port}`,accountIds=[],transactionIds=[];
+  const before=(await (await fetch(`${base}/api/bootstrap`)).json()).cash_flow.default_configuration;
+  const save=async configuration=>fetch(`${base}/api/settings/cash-flow`,{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify(configuration)});
+  let viewId;
+  try{
+    for(const [name,type] of [["Cash checking","checking"],["Cash savings","savings"],["Cash credit card","credit"],["Cash retirement plan","investment"],["Cash wallet","checking"]]){
+      accountIds.push(Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES('Test Bank',?,?)").run(name,type).lastInsertRowid));
+    }
+    const [bank,savings,credit,plan,wallet]=accountIds;
+    const insert=(accountId,date,merchant,amount,category)=>{
+      const id=Number(database.prepare(`INSERT INTO transactions(account_id,date,merchant,amount,category,category_source,categorization_status,ai_categorization_disabled)
+        VALUES(?,?,?,?,?,'manual','categorized',1)`).run(accountId,date,merchant,amount,category).lastInsertRowid);
+      transactionIds.push(id);return id;
+    };
+    insert(bank,"2026-09-05","Cash salary",5000,"Paychecks");
+    const paymentId=insert(bank,"2026-09-10","Card payment",-1000,"Credit Card Payment");
+    insert(credit,"2026-08-15","Earlier card purchase",-1000,"Groceries");
+    insert(bank,"2026-09-12","Bank rent",-2000,"Rent");
+    insert(bank,"2026-09-13","Bank refund",50,"Groceries");
+    insert(bank,"2026-09-14","Move into investments",-500,"Transfer");
+    insert(plan,"2026-09-15","Retirement contribution",1000,"Paychecks");
+    insert(wallet,"2026-09-16","Wallet-only payment",-99,"Personal");
+    const out=insert(bank,"2026-09-30","Move to savings",-400,"Transfer");
+    const into=insert(savings,"2026-10-01","Move from checking",400,"Transfer");
+    database.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(into,out);
+    database.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(out,into);
+    const snapshot=database.prepare("SELECT * FROM transactions WHERE id>=? AND id<=? ORDER BY id").all(transactionIds[0],transactionIds.at(-1));
+    assert.equal((await save({mode:"wrong"})).status,400);
+    assert.equal((await save({endpoint_account_ids:[credit]})).status,200);
+    assert.equal((await save({endpoint_account_ids:[plan]})).status,200);
+    assert.equal((await save({endpoint_account_ids:[99999999]})).status,400);
+    assert.equal((await save({endpoint_account_ids:"invalid"})).status,400);
+    const configuration={mode:"bank-endpoints",endpoint_account_ids:[bank,savings]};
+    assert.equal((await save(configuration)).status,200);
+    const params=new URLSearchParams({from:"2026-09-01",to:"2026-09-30",accounts:accountIds.join(","),paycheck_mode:"full-paycheck"});
+    const response=await (await fetch(`${base}/api/bootstrap?${params}`)).json(),cash=response.cash_flow;
+    assert.deepEqual(cash.default_configuration,configuration);
+    assert.deepEqual(cash.configuration,configuration);
+    assert.deepEqual(cash.effective_endpoint_account_ids,[bank,savings]);
+    assert.equal(cash.accounts.some(account=>account.id===credit),true);
+    assert.equal(cash.accounts.some(account=>account.id===plan),true);
+    assert.deepEqual(cash.report.summary.totals,{income:5050,expense:3500,net:1550});
+    assert.deepEqual(cash.report.summary.months,[{month:"2026-09",income:5050,expense:3500}]);
+    assert.deepEqual(cash.report.internal_transfers.map(row=>row.id),[out]);
+    assert.equal(cash.report.transactions.some(row=>row.account_id===wallet||row.account_id===credit||row.account_id===plan),false);
+    assert.equal(cash.report.transactions.find(row=>row.id===paymentId).category,"Credit Card Payment");
+    assert.equal(cash.report.transactions.some(row=>"original_details_json" in row),false);
+    assert.equal(response.summary.totals.income,6000); // Existing category/paycheck report is independent.
+
+    params.set("accounts",String(bank));
+    const boundary=(await (await fetch(`${base}/api/transactions?${params}`)).json()).cash_flow.report;
+    assert.equal(boundary.summary.totals.expense,3900); // Savings is now outside the selected boundary.
+    assert.equal(boundary.internal_transfers.length,0);
+    params.set("categories","Credit Card Payment");
+    const payments=(await (await fetch(`${base}/api/transactions?${params}`)).json()).cash_flow.report;
+    assert.equal(payments.transactions.length,1);assert.equal(payments.summary.totals.expense,1000);
+    params.set("search","Card payment");
+    assert.equal((await (await fetch(`${base}/api/transactions?${params}`)).json()).cash_flow.report.transactions.length,1);
+    params.delete("categories");params.delete("search");params.set("endpoints",String(savings));
+    assert.equal((await (await fetch(`${base}/api/transactions?${params}`)).json()).cash_flow.report.transactions.length,0);
+    params.set("cash_flow_mode","transactions");
+    assert.equal((await (await fetch(`${base}/api/transactions?${params}`)).json()).cash_flow.report,null);
+    const view=await (await fetch(`${base}/api/views`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({name:"Cash basis",configuration:{cash_flow:configuration,filters:{range:"all"}}})})).json();
+    viewId=view.id;
+    assert.deepEqual((await (await fetch(`${base}/api/views/${viewId}`)).json()).configuration.cash_flow,configuration);
+    assert.deepEqual(database.prepare("SELECT * FROM transactions WHERE id>=? AND id<=? ORDER BY id").all(transactionIds[0],transactionIds.at(-1)),snapshot);
+    await fetch(`${base}/api/accounts/${savings}`,{method:"DELETE"});
+    assert.deepEqual((await (await fetch(`${base}/api/bootstrap`)).json()).cash_flow.configuration.endpoint_account_ids,[bank]);
+  }finally{
+    await save(before);
+    if(viewId)await fetch(`${base}/api/views/${viewId}`,{method:"DELETE"});
+    for(const id of accountIds){
+      database.prepare("UPDATE transactions SET transfer_pair_id=NULL WHERE account_id=? OR transfer_pair_id IN (SELECT id FROM transactions WHERE account_id=?)").run(id,id);
+      database.prepare("DELETE FROM accounts WHERE id=?").run(id);
+    }
+    database.close();
+  }
+});
+
+test("general endpoints support broker funding, investment metadata and fees, and selected credit cards",async()=>{
+  const database=new DatabaseSync(join(temp,"test.db"));
+  database.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000");
+  const base=`http://localhost:${port}`,accountIds=[],transactionIds=[];
+  const before=(await (await fetch(`${base}/api/bootstrap`)).json()).cash_flow.default_configuration;
+  const save=async ids=>fetch(`${base}/api/settings/cash-flow`,{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({mode:"bank-endpoints",endpoint_account_ids:ids})});
+  try{
+    for(const [name,type] of [["Funding bank","checking"],["Robinhood endpoint","investment"],["Selected card","credit"]]){
+      accountIds.push(Number(database.prepare("INSERT INTO accounts(institution,name,type) VALUES('Test',?,?)").run(name,type).lastInsertRowid));
+    }
+    const [bank,broker,card]=accountIds;
+    const insert=(account_id,date,amount,category,details={},external=null)=>{
+      const id=Number(database.prepare(`INSERT INTO transactions(account_id,date,merchant,amount,category,original_details_json,external_id,ai_categorization_disabled)
+        VALUES(?,?,'General endpoint fixture',?,?,?,?,1)`).run(account_id,date,amount,category,JSON.stringify(details),external).lastInsertRowid);
+      transactionIds.push(id);return id;
+    };
+    const pair=(left,right)=>{
+      database.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(right,left);
+      database.prepare("UPDATE transactions SET transfer_pair_id=? WHERE id=?").run(left,right);
+    };
+    insert(bank,"2026-09-01",5000,"Paychecks");
+    pair(insert(bank,"2026-09-30",-4000,"Transfer"),insert(broker,"2026-10-01",4000,"Transfer",{source:"plaid",investment:true,transaction:{type:"transfer",subtype:"transfer"}}));
+    const buy=insert(broker,"2026-10-02",-3002,"Personal",{source:"plaid",investment:true,transaction:{type:"buy",subtype:"buy",fees:2}});
+    insert(broker,"2026-10-03",1999,"Sell",{},"general-endpoint-sell");
+    database.prepare(`INSERT INTO investment_ledger(external_id,account_id,date,name,amount,type,subtype,fees)
+      VALUES('general-endpoint-sell',?,'2026-10-03','Sell',-1999,'sell','sell',1)`).run(broker);
+    insert(broker,"2026-10-04",20,"Dividends & Capital Gains");
+    insert(broker,"2026-10-04",-5,"Financial Fees");
+    pair(insert(bank,"2026-10-05",-100,"Credit Card Payment"),insert(card,"2026-10-06",100,"Credit Card Payment"));
+    insert(card,"2026-10-07",-80,"Groceries");
+    const snapshot=database.prepare("SELECT * FROM transactions WHERE id>=? AND id<=? ORDER BY id").all(transactionIds[0],transactionIds.at(-1));
+    assert.equal((await save([bank,broker])).status,200);
+    const query=new URLSearchParams({from:"2026-09-01",to:"2026-10-31",accounts:accountIds.join(",")});
+    const get=async()=>(await (await fetch(`${base}/api/transactions?${query}`)).json()).cash_flow;
+    let cash=await get();
+    assert.deepEqual(cash.report.summary.totals,{income:5020,expense:108,net:4912});
+    assert.equal(cash.report.internal_transfers.length,2);
+    assert.equal(cash.report.investment_activity.length,2);
+    assert.equal(cash.report.investment_activity.find(row=>row.id===buy).investment_action,"buy");
+    assert.deepEqual(cash.report.transactions.filter(row=>row.report_component==="trade_fee").map(row=>row.amount).sort(),[-1,-2]);
+    assert.equal((await save([bank,broker,card])).status,200);
+    cash=await get();
+    assert.deepEqual(cash.report.summary.totals,{income:5020,expense:88,net:4932});
+    assert.equal(cash.report.internal_transfers.length,4);
+    assert.equal(cash.report.transactions.filter(row=>row.account_id===card).length,1);
+    query.set("categories","Financial Fees");
+    const fees=(await get()).report;
+    assert.equal(fees.summary.totals.expense,8);
+    assert.equal(fees.transactions.length,3);
+    assert.deepEqual(database.prepare("SELECT * FROM transactions WHERE id>=? AND id<=? ORDER BY id").all(transactionIds[0],transactionIds.at(-1)),snapshot);
+  }finally{
+    await fetch(`${base}/api/settings/cash-flow`,{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify(before)});
+    for(const id of accountIds){
+      database.prepare("UPDATE transactions SET transfer_pair_id=NULL WHERE account_id=? OR transfer_pair_id IN (SELECT id FROM transactions WHERE account_id=?)").run(id,id);
+      database.prepare("DELETE FROM accounts WHERE id=?").run(id);
+    }
+    database.close();
+  }
+});
+
 test("report views persist configuration without calculated values",async()=>{
   const configuration={version:1,filters:{range:"custom",from:"2026-06-01",to:"2026-06-30",accounts:[1],categories:["Groceries"],search:"market"}};
   const create=await fetch(`http://localhost:${port}/api/views`,{

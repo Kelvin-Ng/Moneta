@@ -5,7 +5,7 @@ import { createContext, runInContext } from "node:vm";
 
 // Run the real client functions with a small DOM adapter, without fetching any
 // financial data or starting the application initialization/network lifecycle.
-function client() {
+function client({fetch:fetchOverride}={}) {
   const elements=new Map(),routes=[];
   const bounds=()=>({left:0,top:0,width:1000,height:340});
   const element=selector=>{
@@ -29,7 +29,7 @@ function client() {
     window:{addEventListener(){},scrollTo(){}},location:{pathname:"/cash-flow",search:""},
     history:{pushState:(_state,_title,path)=>routes.push(path)},
     requestAnimationFrame:callback=>callback(),setTimeout,clearTimeout,URLSearchParams,
-    fetch(){throw new Error("Month selection must not fetch or change the underlying report data");}
+    fetch:fetchOverride||(()=>{throw new Error("Month selection must not fetch or change the underlying report data")})
   });
   const source=readFileSync(new URL("../public/app.js",import.meta.url),"utf8");
   const initialization=source.lastIndexOf("initialize().catch(");
@@ -38,6 +38,7 @@ function client() {
     globalThis.app={state,bind,renderCashFlow,selectCashFlowMonth,selectSankeyNode,
       cashFlowTransactions,cashFlowData,showCashFlowBarTooltip,setRange,
       currentReportConfiguration,applyReportConfiguration,applyDefaultReportConfiguration,renderPaycheckReporting,reportSettingsSummary,queryString,
+      bankEndpointMode,indexSankeyControls,setSankeyHover,load,
       barData:()=>cashFlowBarChartState?.data};
   `,context);
   const app=context.app;
@@ -148,6 +149,100 @@ test("saved views remember paycheck mode, while leaving a view restores the pers
   app.renderPaycheckReporting();assert.equal(element("#paycheckReportingNote").hidden,true);
   app.state.paycheckMode="full-paycheck";app.state.reporting={contribution_account_ids:[]};
   app.renderPaycheckReporting();assert.match(element("#paycheckReportingNote").innerHTML,/Configure payroll plans in Settings/);
+});
+
+test("bank cash flow drives account-based Sankey, monthly bars, drill-downs, and cash labels without changing the normal report",()=>{
+  const {app,element,clickMonth}=client(),normalSummary=app.state.summary,normalTransactions=app.state.transactions;
+  app.state.cashFlowConfiguration={mode:"bank-endpoints",endpoint_account_ids:[1,2]};
+  app.state.cashFlowAccounts=[{id:1,name:"Main bank",institution:"Test Bank"},{id:2,name:"Savings bank",institution:"Test Bank"}];
+  app.state.effectiveEndpoints=[1,2];
+  const bank=(id,account_id,date,amount,category)=>({id,account_id,date,amount,merchant:`Bank movement ${id}`,account_name:account_id===1?"Main bank":"Savings bank",endpoint_name:account_id===1?"Main bank":"Savings bank",category,category_group:category==="Paychecks"?"Income":"Transfers",report_adjustment:"bank_cash_movement"});
+  app.state.cashFlowReport={transactions:[
+    bank(1,1,"2026-08-10",1000,"Paychecks"),bank(2,1,"2026-08-11",-100,"Credit Card Payment"),
+    bank(3,1,"2026-09-10",2000,"Paychecks"),bank(4,1,"2026-09-11",-600,"Credit Card Payment"),
+    bank(5,2,"2026-09-12",-200,"Credit Card Payment"),bank(6,1,"2026-09-13",50,"Groceries")
+  ],internal_transfers:[{...bank(7,1,"2026-09-14",-300,"Transfer"),counterpart_account_name:"Savings bank"}],
+    summary:{totals:{income:3050,expense:900,net:2150},months:[{month:"2026-08",income:1000,expense:100},{month:"2026-09",income:2050,expense:800}]},pending_count:1,unmatched_transfer_count:1};
+  app.state.paycheckMode="full-paycheck";app.renderPaycheckReporting();app.renderCashFlow();clickMonth("2026-09");
+  assert.equal(element("#paycheckModeControl").hidden,true);
+  assert.equal(element("#cashflowIncomeTitle").textContent,"Cash inflow");
+  assert.equal(element("#cashflowExpenseTitle").textContent,"Cash outflow");
+  assert.equal(element("#cashflowIncome").textContent,"$2,050.00");
+  assert.equal(element("#cashflowExpense").textContent,"$800.00");
+  assert.equal(element("#cashflowNet").textContent,"$1,250.00");
+  assert.equal(element("#cashflowSankeyTitle").textContent,"Account endpoint flow");
+  assert.match(element("#cashflowSankey").innerHTML,/Main bank|Savings bank/);
+  assert.match(element("#cashflowSankey").innerHTML,/Cash retained/);
+  assert.match(element("#bankEndpointSummary").innerHTML,/\$2,050.00/);
+  assert.match(element("#bankEndpointSummary").innerHTML,/-\$300.00/);
+  assert.match(element("#bankEndpointSummary").innerHTML,/\$1,150.00/);
+  assert.match(element("#bankInternalTransferRows").innerHTML,/Bank movement 7/);
+  assert.match(element("#bankEndpointNote").textContent,/pending entries excluded/);
+  assert.match(element("#cashflowMonthDetailsSummary").textContent,/Cash inflow/);
+  assert.doesNotMatch(element("#cashflowMonthDetailsRows").innerHTML,/September groceries|Bank movement 7/);
+  assert.equal(app.barData().length,2);
+  assert.equal(app.cashFlowData().expenses.length,2); // Same category, distinct bank endpoints.
+  app.selectSankeyNode({dataset:{sankeyScope:"group",sankeyName:"Main bank",sankeyGroup:"Main bank",sankeySide:"expense"}});
+  assert.match(element("#sankeyDetailsSummary").textContent,/1 transaction · \$600.00/);
+  assert.equal(element("#sankeyDetailsType").textContent,"SELECTED ENDPOINT");
+  app.selectSankeyNode({dataset:{sankeyScope:"category",sankeyName:"Credit Card Payment",sankeyGroup:"Main bank",sankeySide:"expense"}});
+  app.selectSankeyNode({dataset:{sankeyScope:"category",sankeyName:"Credit Card Payment",sankeyGroup:"Savings bank",sankeySide:"expense"}});
+  assert.equal(app.state.sankeySelection.group,"Savings bank");
+  assert.match(element("#sankeyDetailsSummary").textContent,/1 transaction · \$200.00/);
+  app.showCashFlowBarTooltip(1);assert.match(element("#cashflowBarTooltip").innerHTML,/Cash inflow/);
+  assert.equal(app.state.summary,normalSummary);assert.equal(app.state.transactions,normalTransactions);
+  const config=JSON.parse(JSON.stringify(app.currentReportConfiguration()));
+  assert.deepEqual(config.cash_flow,{mode:"bank-endpoints",endpoint_account_ids:[1,2]});
+  app.applyReportConfiguration(config,{rebuild:false});
+  assert.equal(app.bankEndpointMode(),true);assert.equal(app.queryString().get("endpoints"),"1,2");
+  assert.equal(app.queryString().get("cash_flow_mode"),"bank-endpoints");
+  app.applyDefaultReportConfiguration();assert.equal(app.bankEndpointMode(),false);
+});
+
+test("investment endpoints show excluded trades separately and only report their fees as outflow",()=>{
+  const {app,element,clickMonth}=client();
+  app.state.cashFlowConfiguration={mode:"bank-endpoints",endpoint_account_ids:[11]};
+  app.state.cashFlowAccounts=[{id:11,name:"Robinhood",institution:"Broker",type:"investment"}];
+  app.state.effectiveEndpoints=[11];
+  const trade={id:1,account_id:11,date:"2026-09-10",merchant:"Stock purchase",account_name:"Robinhood",endpoint_name:"Robinhood",amount:-1002,investment_action:"buy",category:"Buy",category_group:"Transfers",report_adjustment:"bank_cash_movement"};
+  app.state.cashFlowReport={transactions:[{...trade,amount:-2,category:"Financial Fees",category_group:"Financial",report_component:"trade_fee"}],
+    investment_activity:[trade],internal_transfers:[],summary:{totals:{income:0,expense:2,net:-2},months:[{month:"2026-09",income:0,expense:2}]}};
+  app.renderCashFlow();clickMonth("2026-09");
+  assert.equal(element("#cashflowExpense").textContent,"$2.00");
+  assert.equal(element("#endpointInvestmentActivity").hidden,false);
+  assert.match(element("#endpointInvestmentActivityRows").innerHTML,/\$1,002.00/);
+  assert.match(element("#endpointInvestmentActivityLabel").textContent,/1 entries/);
+  assert.match(element("#cashflowMonthDetailsRows").innerHTML,/Reported trading fee/);
+  assert.doesNotMatch(element("#cashflowMonthDetailsRows").innerHTML,/\$1,002.00/);
+  assert.match(element("#cashflowSankey").innerHTML,/Robinhood/);
+  assert.match(element("#bankEndpointNote").textContent,/Investment trades are internal/);
+});
+
+test("bank endpoint mode has an explicit empty state and does not fall back to credit-card activity",()=>{
+  const {app,element}=client();
+  app.state.cashFlowConfiguration={mode:"bank-endpoints",endpoint_account_ids:[]};app.renderCashFlow();
+  assert.equal(app.cashFlowTransactions().length,0);
+  assert.equal(element("#cashflowIncome").textContent,"$0.00");
+  assert.match(element("#bankEndpointNote").textContent,/Choose at least one endpoint/);
+  assert.match(element("#cashflowSankey").innerHTML,/Choose endpoint accounts/);
+  app.state.cashFlowConfiguration.endpoint_account_ids=[1];app.renderCashFlow();
+  assert.match(element("#bankEndpointNote").textContent,/account filter excludes all/);
+  app.state.cashFlowConfiguration.endpoint_account_ids=[1,11];app.state.effectiveEndpoints=[1];
+  app.state.cashFlowAccounts=[{id:1,name:"Bank",institution:"Test",type:"checking"},{id:11,name:"Robinhood",institution:"Broker",type:"investment"}];
+  app.renderCashFlow();assert.match(element("#bankEndpointNote").textContent,/account filter excludes Robinhood/);
+});
+
+test("Sankey hover distinguishes repeated categories belonging to different endpoint accounts",()=>{
+  const {app,element}=client();
+  const controls=[element("#bank-one-category"),element("#bank-two-category"),element("#bank-one-group"),element("#bank-two-group")];
+  controls.forEach((control,index)=>{control.dataset={sankeyScope:index<2?"category":"group",sankeyName:index<2?"Credit Card Payment":index===2?"Bank one":"Bank two",sankeyGroup:index%2?"Bank two":"Bank one",sankeySide:"expense"}});
+  app.indexSankeyControls({querySelectorAll:()=>controls});
+  app.setSankeyHover(controls[0],true);
+  assert.equal(controls[0].classList.contains("related"),true);assert.equal(controls[2].classList.contains("related"),true);
+  assert.equal(controls[1].classList.contains("related"),false);
+  app.setSankeyHover(controls[1],true);
+  assert.equal(controls[0].classList.contains("related"),false);assert.equal(controls[2].classList.contains("related"),false);
+  assert.equal(controls[1].classList.contains("related"),true);assert.equal(controls[3].classList.contains("related"),true);
 });
 
 test("month filters can switch, clear on a second click, and respond to keyboard activation",()=>{

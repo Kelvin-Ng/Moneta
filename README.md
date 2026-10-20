@@ -14,6 +14,7 @@ database and can import financial data through Plaid or CSV.
 - Monarch-style category groups and categories
 - Batched AI categorization with provider-neutral rules and re-categorization
 - Filterable cash-flow totals, monthly bar chart, and interactive Sankey report
+- Account-endpoint cash-flow mode with a configurable boundary including bank, investment, cash, and credit-card accounts
 - Take-home or full-paycheck reporting (take-home plus payroll retirement contributions), with explicit plan-account roles to avoid counting internal movements twice
 - Daily net-worth history that uses source-labelled dates directly, preserves
   partial earlier history, and requires complete selected-account coverage only
@@ -34,6 +35,57 @@ Sankey, and transaction details to that month within the active report filters.
 The bar chart retains all months in the date range for comparison. Click the
 selected month again to clear the month filter. Saved views remember the month
 filter as part of their configuration.
+
+### Account cash flow
+
+On **Cash flow → View**, choose **Account cash flow**, select your endpoint accounts,
+and click **Apply endpoints**. All account types can be endpoints: checking, savings,
+cash, investments, and credit cards. Selected accounts define the reporting boundary.
+For example, select both Wealthfront and Robinhood to treat matched funding transfers
+as internal movements rather than cash outflows. Leave Robinhood unchecked to see
+investment funding as money leaving your bank-only boundary. Endpoint selection is
+explicit, so an unconfigured view asks you to choose accounts rather than guessing.
+
+This mode measures cash crossing the selected account boundary:
+
+- Posted positive amounts are cash inflows; negative amounts are cash outflows.
+  Refunds are inflows, not reductions to spending. These are not taxable-income or
+  expense totals.
+- With bank-only endpoints, credit-card payments count on the bank posting date;
+  purchases on unselected cards do not appear. Include a card to count its actual
+  purchases and exclude matched payments between that card and other selected
+  accounts. Leave Venmo/PayPal wallets unchecked if you want funding-bank entries
+  rather than activity within the wallets. Pending entries are excluded.
+- Investment buys, sells, and reinvestment trades exchange assets inside the account
+  and are excluded. The excluded trades remain inspectable. Explicitly reported
+  embedded trading fees are included as Financial Fees; separately posted fees,
+  interest, dividends, and external contributions still count. Source investment
+  metadata identifies trades, with Buy/Sell categories as a fallback when metadata
+  is unavailable. Market-value changes are not cash flow. Payroll contributions
+  count only when recorded in a selected account; the full-paycheck projection
+  applies only to the regular transaction-based report.
+- Reciprocally paired **Transfer** entries between selected endpoints are excluded
+  from headline totals. The links must connect different accounts, have opposite
+  amounts, and post within four days. Both entries must be posted and categorized
+  Transfer, or Transfer/Credit Card Payment when a selected card is involved.
+  Peer context is checked outside the visible date/category/search
+  filters, including across month boundaries. The exclusion list remains available
+  to inspect; categories and pairing metadata are never rewritten.
+- Transfers to an account outside the selected boundary count as cash crossing
+  that boundary. Unpaired Transfer entries remain included and are called out;
+  equal amounts alone are not grounds to discard a movement.
+
+The endpoint table shows inflows, outflows, internal-transfer net, and total posted
+cash movement per account. Different posting dates can leave cash in transit.
+Monthly bars, account-based Sankey nodes, and drill-down lists use the same endpoint
+cash-flow data. Click an account node or flow to inspect its transactions. Clicking
+a month also updates the endpoint table without hiding the other monthly bars.
+Account filters narrow the endpoint boundary; category and search filters narrow
+the displayed movements using their stored categories and descriptions.
+
+The mode and endpoint choices persist in SQLite and can be saved in a report view.
+Overview, transaction activity, net-worth reporting, and AI categorization are
+unchanged.
 
 ### Paycheck reporting
 
@@ -148,8 +200,9 @@ npm run sync
 The command uses the same database, Plaid settings, transaction cursors,
 investment refreshes, transfer matching, and optional AI categorization as the
 website. Transfer matching only links transactions for reconciliation; it never
-changes categories or AI/manual categorization metadata. Report totals depend
-on category groups, not transaction pairing. It works whether the web server is
+changes categories or AI/manual categorization metadata. Regular transaction-report
+totals depend on category groups; account-endpoint reports also use validated links
+to exclude internal transfers. It works whether the web server is
 running or stopped and can be run from any directory with
 `node /absolute/path/to/Moneta/scripts/sync.mjs`.
 Per-connection database locks prevent simultaneous jobs from importing from the

@@ -7,6 +7,7 @@ const sourceDateLabel = (value,options={}) => {
   return new Intl.DateTimeFormat("en-US",{...options,timeZone:"UTC"}).format(new Date(Date.UTC(year,month-1,day,12)));
 };
 const state = {accounts:[],transactions:[],reportTransactions:null,paycheckMode:null,defaultPaycheckMode:"take-home",reporting:null,categories:[],categoryGroups:[],views:[],activeView:null,settings:null,summary:null,netWorth:{history:[],accounts:[],latest:0,change:0,closing_dates:0},sankeySelection:null,cashFlowMonthSelection:null,filters:{from:"",to:"",accounts:new Set(),categories:new Set(),search:""},range:"quarter",section:"overview"};
+Object.assign(state,{cashFlowConfiguration:null,defaultCashFlowConfiguration:{mode:"transactions",endpoint_account_ids:[]},cashFlowReport:null,cashFlowAccounts:[],effectiveEndpoints:[]});
 const colors=["#e97567","#6d5dfc","#e6a04b","#28a792","#9f938c","#60a5c5","#d577aa"];
 const csvMappingFields=[
   {key:"date",label:"Date",required:true,aliases:["date","transaction date","posted date","posting date"]},
@@ -83,6 +84,7 @@ function updateDateLabel(){
 function queryString() {
   const p=new URLSearchParams();
   if(state.paycheckMode)p.set("paycheck_mode",state.paycheckMode);
+  if(state.cashFlowConfiguration){p.set("cash_flow_mode",state.cashFlowConfiguration.mode);p.set("endpoints",state.cashFlowConfiguration.endpoint_account_ids.join(","))}
   if(state.filters.from)p.set("from",state.filters.from);
   if(state.filters.to)p.set("to",state.filters.to);
   if(state.filters.accounts.size)p.set("accounts",[...state.filters.accounts].join(","));
@@ -101,11 +103,18 @@ async function load(initial=false) {
   state.reporting=data.reporting||null;
   state.paycheckMode=data.reporting?.mode||state.paycheckMode||"take-home";
   state.defaultPaycheckMode=data.reporting?.default_mode||"take-home";
+  if(data.cash_flow){
+    state.cashFlowConfiguration=data.cash_flow.configuration;
+    state.defaultCashFlowConfiguration=data.cash_flow.default_configuration;
+    state.cashFlowReport=data.cash_flow.report;state.cashFlowAccounts=data.cash_flow.accounts;
+    state.effectiveEndpoints=data.cash_flow.effective_endpoint_account_ids;
+    renderBankEndpointChoices();
+  }
   render();
 }
 
 function currentReportConfiguration(){
-  return {version:1,paycheck_mode:state.paycheckMode||"take-home",filters:{
+  return {version:1,paycheck_mode:state.paycheckMode||"take-home",cash_flow:state.cashFlowConfiguration||{mode:"transactions",endpoint_account_ids:[]},filters:{
     range:state.range,
     from:state.filters.from,
     to:state.filters.to,
@@ -118,6 +127,7 @@ function currentReportConfiguration(){
 
 function applyReportConfiguration(configuration,{rebuild=true}={}){
   state.paycheckMode=configuration?.paycheck_mode==="full-paycheck"?"full-paycheck":"take-home";
+  state.cashFlowConfiguration={mode:configuration?.cash_flow?.mode==="bank-endpoints"?"bank-endpoints":"transactions",endpoint_account_ids:[...(configuration?.cash_flow?.endpoint_account_ids||[])]};
   const filters=configuration?.filters||{};
   if(["month","quarter","year","all"].includes(filters.range)) setRange(filters.range);
   else{
@@ -136,7 +146,7 @@ function applyReportConfiguration(configuration,{rebuild=true}={}){
 }
 
 function applyDefaultReportConfiguration(){
-  applyReportConfiguration({version:1,paycheck_mode:state.defaultPaycheckMode,filters:{
+  applyReportConfiguration({version:1,paycheck_mode:state.defaultPaycheckMode,cash_flow:state.defaultCashFlowConfiguration,filters:{
     range:"quarter",
     accounts:[],
     categories:[],
@@ -164,6 +174,8 @@ function reportSettingsSummary(){
   const range=filter.range==="custom"?$("#dateLabel").textContent:{month:"This month",quarter:"Rolling 3 months",year:"This year",all:"All time"}[filter.range]||$("#dateLabel").textContent;
   const accountNames=filter.accounts.map(id=>state.accounts.find(account=>account.id===id)).filter(Boolean).map(account=>account.name);
   const rows=[
+    ["Cash-flow view",bankEndpointMode()?"Account cash flow":"Transactions"],
+    ...(bankEndpointMode()?[["Endpoint accounts",state.cashFlowAccounts.filter(account=>state.cashFlowConfiguration.endpoint_account_ids.includes(account.id)).map(account=>account.name).join(", ")||"None selected"]]:[]),
     ["Paycheck reporting",state.paycheckMode==="full-paycheck"?"Full paycheck · take-home + payroll retirement":"Take-home"],
     ["Date range",range],
     ["Month focus",filter.month?cashFlowMonthLabel(filter.month):"All months in range"],
@@ -238,9 +250,10 @@ function render(){
 function renderPaycheckReporting(){
   $("#paycheckMode").value=state.paycheckMode||"take-home";
   const relevant=["overview","cashflow","insights","transactions"].includes(state.section);
-  $("#paycheckModeControl").hidden=!relevant;
+  const bank=state.section==="cashflow"&&bankEndpointMode();
+  $("#paycheckModeControl").hidden=!relevant||bank;
   const full=state.paycheckMode==="full-paycheck";
-  $("#paycheckReportingNote").hidden=!full||!relevant;
+  $("#paycheckReportingNote").hidden=!full||!relevant||bank;
   $("#paycheckReportingNote").innerHTML=!(state.reporting?.contribution_account_ids?.length)
     ? `Full paycheck needs contribution-source accounts. <a href="/settings">Configure payroll plans in Settings</a>. No additional income is inferred yet.`
     : `Full paycheck = take-home + payroll retirement contributions (${fmt(state.reporting.contribution_amount||0)} in this date range). Internal plan movements are transfers. Taxes and benefits are not inferred; stored transaction categories and net worth are unchanged.`;
@@ -450,23 +463,64 @@ function updateNetWorthHover(event){
 }
 
 function groupForCategory(category){return state.categoryGroups.find(group=>group.categories.includes(category))?.name||"Other"}
-function transactionClass(transaction){const group=transaction.category_group||groupForCategory(transaction.category);return group==="Income"?"income":group==="Transfers"?"transfer":"expense"}
+function transactionClass(transaction){
+  if(transaction.report_adjustment==="bank_cash_movement")return transaction.amount>0?"income":"expense";
+  const group=transaction.category_group||groupForCategory(transaction.category);return group==="Income"?"income":group==="Transfers"?"transfer":"expense";
+}
+function bankEndpointMode(){return state.cashFlowConfiguration?.mode==="bank-endpoints"}
+function cashFlowSummary(){return bankEndpointMode()?(state.cashFlowReport?.summary||{totals:{income:0,expense:0,net:0},months:[]}):state.summary}
+function cashFlowGroup(transaction){return bankEndpointMode()?transaction.endpoint_name:(transaction.category_group||groupForCategory(transaction.category))}
+function emptyCashFlowMessage(){return bankEndpointMode()?state.cashFlowConfiguration.endpoint_account_ids.length?"No cash movements in this range":"Choose endpoint accounts above to inspect account cash flow":"No income or expenses in this range"}
+
+function renderBankEndpointChoices(){
+  const selected=new Set(state.cashFlowConfiguration?.endpoint_account_ids||[]);
+  $("#bankEndpointChoices").innerHTML=state.cashFlowAccounts.map(account=>`<label><input type="checkbox" data-bank-endpoint value="${account.id}" ${selected.has(account.id)?"checked":""}><span><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(account.institution)} · ${escapeHtml(account.type)}</small></span></label>`).join("")||`<p>No accounts are connected.</p>`;
+}
+
+function renderBankEndpointReport(){
+  $("#cashFlowMode").value=state.cashFlowConfiguration?.mode||"transactions";
+  $("#bankEndpointControls").hidden=!bankEndpointMode();
+  if(!bankEndpointMode())return;
+  const report=state.cashFlowReport,selected=state.cashFlowConfiguration.endpoint_account_ids;
+  const filteredOut=state.cashFlowAccounts.filter(account=>selected.includes(account.id)&&!state.effectiveEndpoints.includes(account.id));
+  const filterWarning=filteredOut.length?` The active account filter excludes ${filteredOut.map(account=>account.name).join(", ")}; include them in the filter to expand the boundary.`:"";
+  const explanation="Only movements crossing the selected account boundary count. Include both your bank and Robinhood to exclude matched funding transfers. Investment trades are internal asset exchanges; reported trading fees still count. Select a credit card to include its purchases and exclude matched payments from other selected endpoints. Matched internal transfers and investment trades remain inspectable below. Account/category/search filters still apply.";
+  $("#bankEndpointNote").textContent=!selected.length?"Choose at least one endpoint account above and click Apply endpoints."
+    :!state.effectiveEndpoints.length?"The active account filter excludes all chosen endpoints. Update the filter or your endpoint selection."
+    :`${explanation}${filterWarning}${report?.pending_count?` ${report.pending_count} pending entries excluded.`:""}${report?.unmatched_transfer_count?` ${report.unmatched_transfer_count} unpaired transfer/payment entries remain in cash inflows/outflows; they are not silently discarded.`:""}`;
+  const rows=cashFlowTransactions();
+  const internal=(report?.internal_transfers||[]).filter(row=>!state.cashFlowMonthSelection||row.date.slice(0,7)===state.cashFlowMonthSelection);
+  $("#bankEndpointSummary").innerHTML=state.cashFlowAccounts.filter(account=>state.effectiveEndpoints.includes(account.id)).map(account=>{
+    const movements=rows.filter(row=>row.account_id===account.id),inflow=movements.reduce((sum,row)=>sum+Math.max(0,row.amount),0),outflow=movements.reduce((sum,row)=>sum+Math.max(0,-row.amount),0);
+    const internalNet=internal.filter(row=>row.account_id===account.id).reduce((sum,row)=>sum+row.amount,0);
+    return `<tr><td>${escapeHtml(account.name)}<small>${escapeHtml(account.institution)}</small></td><td class="right">${fmt(inflow)}</td><td class="right">${fmt(outflow)}</td><td class="right">${fmt(internalNet)}</td><td class="right">${fmt(inflow-outflow+internalNet)}</td></tr>`;
+  }).join("");
+  $("#bankInternalTransfers").hidden=!internal.length;
+  $("#bankInternalTransfersLabel").textContent=`Excluded internal transfers · ${internal.length} ledger entries (both sides may appear)`;
+  $("#bankInternalTransferRows").innerHTML=internal.map(row=>`<tr><td>${sourceDateLabel(row.date,{month:"short",day:"numeric",year:"numeric"})}</td><td>${escapeHtml(row.merchant)}</td><td>${escapeHtml(row.endpoint_name)}</td><td>${escapeHtml(row.counterpart_account_name)}</td><td class="right">${fmt(row.amount)}</td></tr>`).join("");
+  const trades=(report?.investment_activity||[]).filter(row=>!state.cashFlowMonthSelection||row.date.slice(0,7)===state.cashFlowMonthSelection);
+  $("#endpointInvestmentActivity").hidden=!trades.length;
+  $("#endpointInvestmentActivityLabel").textContent=`Excluded investment trades · ${trades.length} entries (reported fees still count)`;
+  $("#endpointInvestmentActivityRows").innerHTML=trades.map(row=>`<tr><td>${sourceDateLabel(row.date,{month:"short",day:"numeric",year:"numeric"})}</td><td>${escapeHtml(row.merchant)}</td><td>${escapeHtml(row.endpoint_name)}</td><td>${escapeHtml(row.investment_action||row.category)}</td><td class="right">${fmt(row.amount)}</td></tr>`).join("");
+}
 
 function reportAdjustmentNote(transaction){
+  if(transaction.report_component==="trade_fee")return `<small>Reported trading fee · trade principal excluded; source transaction unchanged</small>`;
+  if(transaction.report_adjustment==="bank_cash_movement")return `<small>Posted account ${transaction.amount>0?"inflow":"outflow"} · stored as ${escapeHtml(transaction.category)}</small>`;
   return transaction.report_adjustment==="payroll_contribution"
     ? `<small>Payroll retirement contribution · report only; stored as ${escapeHtml(transaction.original_category)}</small>`:"";
 }
 
 function cashFlowTransactions(){
   const month=state.cashFlowMonthSelection;
-  const rows=state.reportTransactions||state.transactions;
+  const rows=bankEndpointMode()?(state.cashFlowReport?.transactions||[]):state.reportTransactions||state.transactions;
   return month?rows.filter(transaction=>transaction.date.slice(0,7)===month):rows;
 }
 
 function cashFlowData(){
   const income=new Map(),expenses=new Map();
   for(const tx of cashFlowTransactions()){
-    const amount=Number(tx.amount)||0,group=tx.category_group||groupForCategory(tx.category),classification=transactionClass(tx);
+    const amount=Number(tx.amount)||0,group=cashFlowGroup(tx),classification=transactionClass(tx);
     if(classification==="income"){const key=`${group}\u0000${tx.category}`;income.set(key,(income.get(key)||0)+amount)}
     if(classification==="expense"){const key=`${group}\u0000${tx.category}`;expenses.set(key,(expenses.get(key)||0)-amount)}
   }
@@ -475,34 +529,49 @@ function cashFlowData(){
 }
 
 function renderCashFlow(){
-  const months=state.summary.months.filter(month=>month.income||month.expense);
+  const summary=cashFlowSummary(),bank=bankEndpointMode();
+  const months=summary.months.filter(month=>month.income||month.expense);
   const selectedMonth=months.find(month=>month.month===state.cashFlowMonthSelection);
   if(state.cashFlowMonthSelection&&!selectedMonth)state.cashFlowMonthSelection=null;
-  const {income,expense}=selectedMonth||state.summary.totals,net=income-expense;
+  const {income,expense}=selectedMonth||summary.totals,net=income-expense;
+  $("#cashflowIncomeTitle").textContent=bank?"Cash inflow":"Total income";
+  $("#cashflowExpenseTitle").textContent=bank?"Cash outflow":"Total expenses";
+  $("#cashflowExpenseLabel").textContent=bank?"Payments crossing the selected account boundary":"Card payments and transfers excluded";
+  $("#cashflowRateTitle").textContent=bank?"Cash retained rate":"Savings rate";
+  $("#cashflowRateLabel").textContent=bank?"Net cash flow ÷ cash inflow":"Net cash flow ÷ income";
+  $("#cashflowBarTitle").textContent=bank?"Cash inflow vs. outflow":"Income vs. expenses";
+  $("#cashflowLegendIncome").textContent=bank?"Cash inflow":"Income";
+  $("#cashflowLegendExpense").textContent=bank?"Cash outflow":"Expenses";
+  $("#cashflowLegendNet").textContent=bank?"Net cash flow":"Net income";
+  $("#cashflowBarChart").setAttribute("aria-label",bank?"Monthly account cash inflow, outflow, and net cash-flow chart":"Monthly income, expense, and net-income chart");
+  $("#cashflowSankeyTitle").textContent=bank?"Account endpoint flow":"Category flow";
+  $("#cashflowSankey").setAttribute("aria-label",bank?"Cash flow Sankey diagram by endpoint account":"Cash flow Sankey diagram by category");
+  $("#cashflowSankeyDescription").textContent=bank?"Inflow categories → receiving accounts → available cash → paying accounts → outflow categories":"Categories → Monarch groups → available cash → groups → categories";
+  $("#cashflowSankeyFootnote").textContent=bank?"Only posted movements crossing the selected endpoint boundary are shown. Funding and card payments are internal when both endpoints are selected and their entries are matched. Investment buys/sells are internal asset exchanges; reported fees still count. Market-value changes are not cash flow. Cash reserves funds excess outflow. These are account movements, not taxable-income totals.":"Transfers, credit-card payments, and investment trades are excluded. If spending exceeds income, Cash reserves represents the amount funded from existing balances.";
   $("#cashflowIncome").textContent=fmt(income);
   $("#cashflowExpense").textContent=fmt(expense);
   $("#cashflowNet").textContent=fmt(net);
   $("#cashflowNet").classList.toggle("negative",net<0);
-  $("#cashflowNetLabel").textContent=net<0?"Expenses exceeded income":"Income minus expenses";
+  $("#cashflowNetLabel").textContent=bank?(net<0?"Cash outflow exceeded inflow":"Cash inflow minus outflow"):net<0?"Expenses exceeded income":"Income minus expenses";
   const rate=income?net/income*100:0;
   $("#cashflowRate").textContent=`${rate.toFixed(1)}%`;
   $("#cashflowRate").classList.toggle("negative",rate<0);
   $("#cashflowIncomeLabel").textContent=selectedMonth?`For ${cashFlowMonthLabel(selectedMonth.month)} · active filters applied`:"For the active date range";
-  renderReportContext();
+  renderBankEndpointReport();renderReportContext();
   renderCashFlowBars();renderCashFlowMonthDetails();renderSankey();renderSankeyDetails();
 }
 
 function sankeyControl(scope,item,side,markup,className){
   const group=scope==="group"?item.name:item.group;
   if(item.synthetic){
-    if(item.name!=="Net savings")return markup;
+    if(!["Net savings","Cash retained"].includes(item.name))return markup;
     return `<g class="${className} sankey-hover-only" data-sankey-scope="${scope}" data-sankey-name="${escapeHtml(item.name)}" data-sankey-group="${escapeHtml(group)}" data-sankey-side="${side}" data-sankey-clickable="false" aria-label="${escapeHtml(item.name)}">${markup}<title>${escapeHtml(item.name)}</title></g>`;
   }
   const selection=state.sankeySelection;
-  const selected=selection?.scope===scope&&selection?.name===item.name&&selection?.side===side;
+  const selected=selection?.scope===scope&&selection?.name===item.name&&selection?.side===side&&selection?.group===group;
   const selectionRelated=selection?.side===side&&(selection.scope==="group"
     ? group===selection.group
-    : (scope==="category"&&item.name===selection.name)||(scope==="group"&&item.name===selection.group));
+    : (scope==="category"&&item.name===selection.name&&group===selection.group)||(scope==="group"&&item.name===selection.group));
   return `<g class="${className}${selected?" selected":""}${selectionRelated?" selection-related":""}" data-sankey-scope="${scope}" data-sankey-name="${escapeHtml(item.name)}" data-sankey-group="${escapeHtml(group)}" data-sankey-side="${side}" role="button" tabindex="0" aria-label="Show transactions for ${escapeHtml(item.name)}">${markup}<title>Show transactions for ${escapeHtml(item.name)}</title></g>`;
 }
 function sankeyNode(scope,item,side,markup){return sankeyControl(scope,item,side,markup,"sankey-node")}
@@ -515,7 +584,7 @@ function indexSankeyControls(svg){
   svg.querySelectorAll("[data-sankey-scope]").forEach(element=>{
     const {sankeyScope:scope,sankeyName:name,sankeyGroup:group,sankeySide:side}=element.dataset;
     add(byGroup,`${side}\u0000${group}`,element);
-    if(scope==="category")add(byCategory,`${side}\u0000${name}`,element);
+    if(scope==="category")add(byCategory,`${side}\u0000${group}\u0000${name}`,element);
     else add(groupControls,`${side}\u0000${name}`,element);
   });
   sankeyHoverIndex={byGroup,byCategory,groupControls};
@@ -526,20 +595,20 @@ function setSankeyHover(control,active){
   const name=active&&control?control.dataset.sankeyName:"";
   const group=active&&control?control.dataset.sankeyGroup:"";
   const side=active&&control?control.dataset.sankeySide:"";
-  const nextKey=active?`${side}\u0000${scope}\u0000${name}`:"";
+  const nextKey=active?`${side}\u0000${scope}\u0000${group}\u0000${name}`:"";
   if(nextKey===sankeyHoverKey)return;
   sankeyHovered.forEach(element=>element.classList.remove("related"));
   sankeyHoverKey=nextKey;
   if(!active){sankeyHovered=[];return}
   sankeyHovered=scope==="group"
     ? (sankeyHoverIndex.byGroup.get(`${side}\u0000${group}`)||[])
-    : [...(sankeyHoverIndex.byCategory.get(`${side}\u0000${name}`)||[]),...(sankeyHoverIndex.groupControls.get(`${side}\u0000${group}`)||[])];
+    : [...(sankeyHoverIndex.byCategory.get(`${side}\u0000${group}\u0000${name}`)||[]),...(sankeyHoverIndex.groupControls.get(`${side}\u0000${group}`)||[])];
   sankeyHovered.forEach(element=>element.classList.add("related"));
 }
 
 function selectSankeyNode(element){
   const next={scope:element.dataset.sankeyScope,name:element.dataset.sankeyName,group:element.dataset.sankeyGroup,side:element.dataset.sankeySide};
-  if(state.sankeySelection?.scope===next.scope&&state.sankeySelection?.name===next.name&&state.sankeySelection?.side===next.side)return clearSankeySelection();
+  if(state.sankeySelection?.scope===next.scope&&state.sankeySelection?.name===next.name&&state.sankeySelection?.side===next.side&&state.sankeySelection?.group===next.group)return clearSankeySelection();
   state.sankeySelection=next;
   renderSankey();renderSankeyDetails();
   requestAnimationFrame(()=>$("#sankeyDetails").scrollIntoView({behavior:"smooth",block:"start"}));
@@ -556,12 +625,12 @@ function renderSankeyDetails(){
   const rows=cashFlowTransactions().filter(transaction=>{
     if(transactionClass(transaction)!==selection.side)return false;
     return selection.scope==="category"
-      ? transaction.category===selection.name
-      : (transaction.category_group||groupForCategory(transaction.category))===selection.name;
+      ? transaction.category===selection.name&&cashFlowGroup(transaction)===selection.group
+      : cashFlowGroup(transaction)===selection.name;
   });
   const total=rows.reduce((sum,transaction)=>sum+(selection.side==="income"?Number(transaction.amount)||0:-(Number(transaction.amount)||0)),0);
   details.hidden=false;
-  $("#sankeyDetailsType").textContent=`SELECTED ${selection.scope.toUpperCase()}`;
+  $("#sankeyDetailsType").textContent=`SELECTED ${bankEndpointMode()&&selection.scope==="group"?"ENDPOINT":selection.scope.toUpperCase()}`;
   $("#sankeyDetailsTitle").textContent=selection.name;
   $("#sankeyDetailsSummary").textContent=`${rows.length} transaction${rows.length===1?"":"s"} · ${fmt(total)} · active filters applied`;
   $("#sankeyDetailsTable").hidden=!rows.length;
@@ -583,9 +652,10 @@ function renderCashFlowMonthDetails(){
   const income=rows.filter(transaction=>transactionClass(transaction)==="income").reduce((sum,transaction)=>sum+(Number(transaction.amount)||0),0);
   const expense=rows.filter(transaction=>transactionClass(transaction)==="expense").reduce((sum,transaction)=>sum-(Number(transaction.amount)||0),0);
   const net=income-expense,rate=income?net/income*100:null;
+  const bank=bankEndpointMode();
   details.hidden=false;
   $("#cashflowMonthDetailsTitle").textContent=cashFlowMonthLabel(month);
-  $("#cashflowMonthDetailsSummary").textContent=`${rows.length} transaction${rows.length===1?"":"s"} · Income ${fmt(income)} · Expenses ${fmt(expense)} · Net income ${fmt(net)} · Saving rate ${rate===null?"—":`${rate.toFixed(1)}%`}`;
+  $("#cashflowMonthDetailsSummary").textContent=`${rows.length} transaction${rows.length===1?"":"s"} · ${bank?"Cash inflow":"Income"} ${fmt(income)} · ${bank?"Cash outflow":"Expenses"} ${fmt(expense)} · ${bank?"Net cash flow":"Net income"} ${fmt(net)} · ${bank?"Cash retained rate":"Saving rate"} ${rate===null?"—":`${rate.toFixed(1)}%`}`;
   $("#cashflowMonthDetailsTable").hidden=!rows.length;
   $("#cashflowMonthDetailsEmpty").hidden=Boolean(rows.length);
   $("#cashflowMonthDetailsRows").innerHTML=rows.map(transaction=>{
@@ -595,7 +665,7 @@ function renderCashFlowMonthDetails(){
 }
 
 function selectCashFlowMonth(month){
-  if(!state.summary.months.some(item=>item.month===month&&(item.income||item.expense)))return;
+  if(!cashFlowSummary().months.some(item=>item.month===month&&(item.income||item.expense)))return;
   detachSavedView();
   state.cashFlowMonthSelection=state.cashFlowMonthSelection===month?null:month;
   renderCashFlow();
@@ -611,8 +681,9 @@ function showCashFlowBarTooltip(index){
   const chart=cashFlowBarChartState,svg=$("#cashflowBarChart"),tooltip=$("#cashflowBarTooltip");
   if(!chart||!chart.data[index])return hideCashFlowBarTooltip();
   const value=chart.data[index],net=value.income-value.expense,rate=value.income?net/value.income*100:null;
+  const bank=bankEndpointMode();
   $$("#cashflowBarChart .cashflow-month-group").forEach((group,groupIndex)=>group.classList.toggle("hovered",groupIndex===index));
-  tooltip.innerHTML=`<span>${cashFlowMonthLabel(value.month)}</span><div><small>Income</small><strong class="positive">${fmt(value.income)}</strong></div><div><small>Expenses</small><strong class="negative">${fmt(value.expense)}</strong></div><div><small>Net income</small><strong class="${net>=0?"positive":"negative"}">${fmt(net)}</strong></div><div><small>Saving rate</small><strong class="${rate!==null&&rate<0?"negative":""}">${rate===null?"—":`${rate.toFixed(1)}%`}</strong></div>`;
+  tooltip.innerHTML=`<span>${cashFlowMonthLabel(value.month)}</span><div><small>${bank?"Cash inflow":"Income"}</small><strong class="positive">${fmt(value.income)}</strong></div><div><small>${bank?"Cash outflow":"Expenses"}</small><strong class="negative">${fmt(value.expense)}</strong></div><div><small>${bank?"Net cash flow":"Net income"}</small><strong class="${net>=0?"positive":"negative"}">${fmt(net)}</strong></div><div><small>${bank?"Cash retained rate":"Saving rate"}</small><strong class="${rate!==null&&rate<0?"negative":""}">${rate===null?"—":`${rate.toFixed(1)}%`}</strong></div>`;
   tooltip.hidden=false;
   const bounds=svg.getBoundingClientRect(),wrapperBounds=tooltip.parentElement.getBoundingClientRect();
   const pointX=chart.pad.l+chart.groupW*(index+.5),screenX=bounds.left+pointX/chart.W*bounds.width;
@@ -630,9 +701,9 @@ function updateCashFlowBarHover(event){
 }
 
 function renderCashFlowBars(){
-  const svg=$("#cashflowBarChart"),data=state.summary.months.filter(month=>month.income||month.expense);
+  const svg=$("#cashflowBarChart"),data=cashFlowSummary().months.filter(month=>month.income||month.expense);
   hideCashFlowBarTooltip();
-  if(!data.length){cashFlowBarChartState=null;hideCashFlowBarTooltip();svg.setAttribute("viewBox","0 0 900 320");svg.style.minWidth="900px";svg.innerHTML=`<text x="450" y="155" text-anchor="middle" class="axis-label">No income or expenses in this range</text>`;return}
+  if(!data.length){cashFlowBarChartState=null;hideCashFlowBarTooltip();svg.setAttribute("viewBox","0 0 900 320");svg.style.minWidth="900px";svg.innerHTML=`<text x="450" y="155" text-anchor="middle" class="axis-label">${emptyCashFlowMessage()}</text>`;return}
   const W=Math.max(900,data.length*88),H=340,pad={l:68,r:26,t:26,b:52};
   const netValues=data.map(month=>month.income-month.expense),domainMin=Math.min(0,...data.flatMap(month=>[month.income,month.expense]),...netValues),domainMax=Math.max(1,...data.flatMap(month=>[month.income,month.expense]),...netValues);
   const plotW=W-pad.l-pad.r,plotH=H-pad.t-pad.b,groupW=plotW/data.length,barW=Math.min(26,groupW*.28);
@@ -657,7 +728,7 @@ function renderSankey(){
   const svg=$("#cashflowSankey"),flow=cashFlowData();
   const incomeTotal=flow.income.reduce((sum,item)=>sum+item.value,0);
   const expenseTotal=flow.expenses.reduce((sum,item)=>sum+item.value,0);
-  if(!incomeTotal&&!expenseTotal){svg.classList.remove("sankey-selected");svg.setAttribute("viewBox","0 0 1000 420");svg.style.width="850px";svg.style.minWidth="850px";svg.innerHTML=`<text x="500" y="210" text-anchor="middle" class="axis-label">No income or expenses in this range</text>`;indexSankeyControls(svg);return}
+  if(!incomeTotal&&!expenseTotal){svg.classList.remove("sankey-selected");svg.setAttribute("viewBox","0 0 1000 420");svg.style.width="850px";svg.style.minWidth="850px";svg.innerHTML=`<text x="500" y="210" text-anchor="middle" class="axis-label">${emptyCashFlowMessage()}</text>`;indexSankeyControls(svg);return}
 
   const groupItems=items=>{
     const grouped=new Map();
@@ -669,7 +740,7 @@ function renderSankey(){
   };
   const sourceGroups=groupItems(flow.income),targetGroups=groupItems(flow.expenses);
   if(expenseTotal>incomeTotal)sourceGroups.push({name:"Funding",value:expenseTotal-incomeTotal,synthetic:true,categories:[{name:"Cash reserves",group:"Funding",value:expenseTotal-incomeTotal,synthetic:true}]});
-  if(incomeTotal>expenseTotal)targetGroups.push({name:"Net savings",value:incomeTotal-expenseTotal,synthetic:true,categories:[]});
+  if(incomeTotal>expenseTotal)targetGroups.push({name:bankEndpointMode()?"Cash retained":"Net savings",value:incomeTotal-expenseTotal,synthetic:true,categories:[]});
   const sourceLeaves=sourceGroups.flatMap(group=>group.categories.map(category=>({...category,group:group.name})));
   const targetLeaves=targetGroups.flatMap(group=>group.categories.map(category=>({...category,group:group.name})));
   const total=Math.max(incomeTotal,expenseTotal),gap=25,pad=42;
@@ -956,6 +1027,23 @@ function switchSection(section,{push=true,preserveView=false}={}){
 }
 
 function bind(){
+  const saveCashFlow=async configuration=>{
+    const saved=await request("/api/settings/cash-flow",{method:"PUT",body:JSON.stringify(configuration)});
+    state.cashFlowConfiguration=saved;state.defaultCashFlowConfiguration=saved;
+    detachSavedView();state.sankeySelection=null;
+    await load();
+  };
+  $("#cashFlowMode").onchange=async event=>{
+    const select=event.currentTarget,previous=state.cashFlowConfiguration;
+    select.disabled=true;
+    try{await saveCashFlow({...(previous||{endpoint_account_ids:[]}),mode:select.value})}
+    catch(error){state.cashFlowConfiguration=previous;select.value=previous?.mode||"transactions";toast(error.message)}finally{select.disabled=false}
+  };
+  $("#applyBankEndpoints").onclick=async event=>{
+    const button=event.currentTarget;button.disabled=true;
+    try{await saveCashFlow({...state.cashFlowConfiguration,mode:"bank-endpoints",endpoint_account_ids:$$("[data-bank-endpoint]:checked").map(input=>Number(input.value))});toast("Endpoint accounts saved")}
+    catch(error){toast(error.message)}finally{button.disabled=false}
+  };
   $("#paycheckMode").onchange=async event=>{
     const select=event.currentTarget,previous=state.paycheckMode;
     select.disabled=true;
